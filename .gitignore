@@ -1,0 +1,12 @@
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# Archives / temp
+*.zip
+*.tar
+*.tgz
+*.tmp
