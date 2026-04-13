@@ -15,13 +15,13 @@ skills/
 
 ```bash
 # List skills in this repo
-npx skills add <owner>/kw-skills --list
+npx skills add LinKenCong/kw-skills --list
 
 # Install one skill from this repo
-npx skills add <owner>/kw-skills --skill git-sync-push
+npx skills add LinKenCong/kw-skills --skill git-sync-push
 
 # Install all skills from this repo
-npx skills add <owner>/kw-skills --skill '*'
+npx skills add LinKenCong/kw-skills --skill '*'
 ```
 
 ## Included skills
