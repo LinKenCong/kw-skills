@@ -1,5 +1,7 @@
 # Figma-to-Code Skill
 
+Inspiration from: https://github.com/About-JayX
+
 Extract design data from Figma Desktop via a local plugin + Bridge, then translate into production frontend code. No Figma MCP Server required.
 
 ## Architecture
