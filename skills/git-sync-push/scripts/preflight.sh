@@ -4,31 +4,9 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$SCRIPT_DIR/common.sh"
 
-if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  echo "RESULT=not_git_repo"
-  exit 1
-fi
-
-current_branch=$(current_branch_name || true)
-if [ -z "$current_branch" ]; then
-  echo "RESULT=detached_head"
-  exit 1
-fi
-
-if ! git remote get-url origin >/dev/null 2>&1; then
-  echo "RESULT=no_origin"
-  echo "CURRENT_BRANCH=$current_branch"
-  echo "REBASE_IN_PROGRESS=$(has_rebase_in_progress && echo true || echo false)"
-  exit 1
-fi
-
-default_branch=$(detect_default_branch || true)
-if [ -z "$default_branch" ]; then
-  echo "RESULT=default_branch_unknown"
-  echo "CURRENT_BRANCH=$current_branch"
-  echo "REBASE_IN_PROGRESS=$(has_rebase_in_progress && echo true || echo false)"
-  exit 1
-fi
+require_repo_context || exit 1
+current_branch="$CURRENT_BRANCH"
+default_branch="$DEFAULT_BRANCH"
 
 remote_url=$(git remote get-url origin)
 status_output=$(git status --porcelain)
@@ -54,4 +32,3 @@ echo "REBASE_IN_PROGRESS=$(has_rebase_in_progress && echo true || echo false)"
 echo "HEAD=$(git rev-parse HEAD)"
 
 print_section STATUS sh -c 'git status --porcelain'
-print_section RECENT_COMMITS sh -c 'git log --oneline -5'

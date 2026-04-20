@@ -4,7 +4,9 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$SCRIPT_DIR/common.sh"
 
-tmpdir=$(make_tmpdir)
+_SYNC_TMPDIR=$(make_tmpdir)
+export _SYNC_TMPDIR
+tmpdir="$_SYNC_TMPDIR"
 cleanup() {
   rm -rf "$tmpdir"
 }
@@ -21,6 +23,7 @@ state_file=$(state_file_path)
 
 emit_conflicts() {
   echo "RESULT=conflict"
+  echo "STASH_REF=$stash_ref"
   print_section CONFLICT_FILES sh -c 'git diff --name-only --diff-filter=U'
   print_section STATUS sh -c 'git status --short'
   exit 1
@@ -38,22 +41,22 @@ restore_stash_if_present() {
   }
 }
 
-if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  echo "RESULT=not_git_repo"
-  exit 1
-fi
-
 rm -f "$state_file"
 
+# Try local detection first; remote set-head may resolve it below
+CURRENT_BRANCH=""
+DEFAULT_BRANCH=""
 current_branch=$(current_branch_name || true)
-if [ -z "$current_branch" ]; then
-  echo "RESULT=detached_head"
-  exit 1
-fi
+default_branch=""
 
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "RESULT=not_git_repo"; exit 1
+fi
+if [ -z "$current_branch" ]; then
+  echo "RESULT=detached_head"; exit 1
+fi
 if ! git remote get-url origin >/dev/null 2>&1; then
-  echo "RESULT=no_origin"
-  exit 1
+  echo "RESULT=no_origin"; exit 1
 fi
 
 default_branch=$(detect_default_branch || true)
@@ -76,6 +79,9 @@ echo "CURRENT_BRANCH=$current_branch"
 echo "DEFAULT_BRANCH=$default_branch"
 echo "HEAD_BEFORE=$(git rev-parse HEAD)"
 
+# Init stash_ref early so emit_conflicts/restore can reference it
+stash_ref=""
+
 while has_rebase_in_progress; do
   if [ -n "$(git diff --name-only --diff-filter=U || true)" ]; then
     emit_conflicts
@@ -97,7 +103,6 @@ while has_rebase_in_progress; do
   fi
 done
 
-stash_ref=""
 status_before=$(git status --porcelain)
 if [ -n "$status_before" ]; then
   stash_name="git-sync-push-backup-$(date +%s)-$$"
@@ -129,7 +134,10 @@ if ! git fetch origin \
   exit 1
 fi
 
-if git ls-remote --exit-code --heads origin "$current_branch" >"$remote_lookup_log" 2>&1; then
+ls_remote_code=0
+git ls-remote --exit-code --heads origin "$current_branch" >"$remote_lookup_log" 2>&1 || ls_remote_code=$?
+
+if [ "$ls_remote_code" -eq 0 ]; then
   remote_branch_status="present"
   if ! git fetch origin \
     "refs/heads/$current_branch:refs/remotes/origin/$current_branch" >>"$fetch_log" 2>&1; then
@@ -138,23 +146,21 @@ if git ls-remote --exit-code --heads origin "$current_branch" >"$remote_lookup_l
     print_section FETCH_OUTPUT cat "$fetch_log"
     exit 1
   fi
-else
-  ls_remote_code=$?
-  if [ "$ls_remote_code" -eq 2 ]; then
+elif [ "$ls_remote_code" -eq 2 ]; then
     remote_branch_status="missing"
-  else
+else
     echo "RESULT=fetch_failed"
     print_section REMOTE_BRANCH_LOOKUP_OUTPUT cat "$remote_lookup_log"
     print_section FETCH_OUTPUT cat "$fetch_log"
     exit 1
-  fi
 fi
 
 if ! git rebase "origin/$default_branch" >"$rebase_log" 2>&1; then
   if [ -n "$(git diff --name-only --diff-filter=U || true)" ]; then
-    echo "STASH_REF=$stash_ref"
     emit_conflicts
   fi
+  # Non-conflict rebase failure: restore stash before reporting
+  restore_stash_if_present "$stash_ref"
   echo "RESULT=rebase_failed"
   print_section REBASE_OUTPUT cat "$rebase_log"
   exit 1

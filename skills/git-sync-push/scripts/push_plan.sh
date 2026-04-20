@@ -10,29 +10,9 @@ read_state_value() {
   sed -n "s/^${key}=//p" "$file" | head -1
 }
 
-if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  echo "RESULT=not_git_repo"
-  exit 1
-fi
-
-current_branch=$(current_branch_name || true)
-if [ -z "$current_branch" ]; then
-  echo "RESULT=detached_head"
-  exit 1
-fi
-
-if ! git remote get-url origin >/dev/null 2>&1; then
-  echo "RESULT=no_origin"
-  echo "CURRENT_BRANCH=$current_branch"
-  exit 1
-fi
-
-default_branch=$(detect_default_branch || true)
-if [ -z "$default_branch" ]; then
-  echo "RESULT=default_branch_unknown"
-  echo "CURRENT_BRANCH=$current_branch"
-  exit 1
-fi
+require_repo_context || exit 1
+current_branch="$CURRENT_BRANCH"
+default_branch="$DEFAULT_BRANCH"
 
 remote_url=$(git remote get-url origin)
 status_output=$(git status --porcelain)
@@ -60,7 +40,7 @@ if [ "$state_matches" = "true" ]; then
   case "$remote_branch_status" in
     missing)
       needs_force=false
-      push_command="git push -u origin $(shell_quote "$current_branch")"
+      push_command="git push -u origin '$current_branch'"
       result="ok"
       ;;
     present)
@@ -69,9 +49,9 @@ if [ "$state_matches" = "true" ]; then
         if ! git merge-base --is-ancestor "origin/$current_branch" HEAD >/dev/null 2>&1; then
           needs_force=true
         fi
-        push_command="git push -u origin $(shell_quote "$current_branch")"
+        push_command="git push -u origin '$current_branch'"
         if [ "$needs_force" = "true" ]; then
-          push_command="git push --force-with-lease origin $(shell_quote "$current_branch")"
+          push_command="git push --force-with-lease origin '$current_branch'"
         fi
         result="ok"
       fi

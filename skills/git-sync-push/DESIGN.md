@@ -203,3 +203,16 @@ Those are separate workflows and should remain outside this skill.
 - Put deterministic workflow logic in `scripts/`.
 - Prefer extending script result codes over embedding more branch logic in prose.
 - If a future environment changes sandbox behavior, adjust the permission strategy section first.
+
+## Changelog
+
+### 2025-06 — Robustness & correctness pass
+
+- **Bug fix**: `sync.sh` `git ls-remote` exit code was captured inside `if` condition, making it impossible to distinguish exit-code 2 (branch missing) from network errors. Fixed by capturing the code before the conditional.
+- **Bug fix**: `sync.sh` rebase failure path did not restore the backup stash, leaving user changes stranded. Non-conflict rebase failures now call `restore_stash_if_present` before exiting. Conflict path now always emits `STASH_REF`.
+- **Bug fix**: `branch_summary.sh` used three-dot `...` (symmetric diff) for `diff --stat`, `--name-only`, and full diff, while commits used two-dot `..`. Unified to two-dot for consistency with push_plan.sh.
+- **Robustness**: Extracted `require_repo_context` into `common.sh` to deduplicate the not_git_repo / detached_head / no_origin / default_branch_unknown gate checks across all four scripts.
+- **Robustness**: `print_section` now reuses a session-level `_SYNC_TMPDIR` when available instead of creating and destroying a temp directory per call.
+- **Robustness**: `push_plan.sh` push command now uses single-quote wrapping instead of `printf %q` shell escaping, avoiding backslash-escaped branch names that confuse agent copy-paste.
+- **Cleanup**: Removed `RECENT_COMMITS` section from `preflight.sh` (not used for any gate decision, adds token overhead).
+- **Cleanup**: `allowed-tools` in SKILL.md updated from `Bash, Read` to `terminal, file`.

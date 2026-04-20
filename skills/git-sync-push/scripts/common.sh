@@ -3,12 +3,7 @@
 print_section() {
   local name="$1"
   shift
-  local tmpdir
-  local output_file
-
-  tmpdir=$(make_tmpdir)
-  output_file="$tmpdir/${name}.out"
-
+  local output_file="${_SYNC_TMPDIR:-$(make_tmpdir)}/${name}.out"
   "$@" >"$output_file" 2>&1 || true
 
   echo "${name}_ENCODING=base64"
@@ -16,8 +11,7 @@ print_section() {
   base64 <"$output_file" | tr -d '\n'
   echo
   echo "__${name}_END__"
-
-  rm -rf "$tmpdir"
+  rm -f "$output_file"
 }
 
 git_path() {
@@ -71,6 +65,40 @@ detect_default_branch() {
 
 make_tmpdir() {
   mktemp -d "${TMPDIR:-/tmp}/git-sync-push.XXXXXX"
+}
+
+# Shared repo-context gate. Prints KEY=VALUE diagnostics and returns 1 on failure.
+# Usage: require_repo_context || exit 1
+# Sets: CURRENT_BRANCH, DEFAULT_BRANCH (exported to caller via eval or source)
+require_repo_context() {
+  if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "RESULT=not_git_repo"
+    return 1
+  fi
+
+  _rrc_branch=$(current_branch_name || true)
+  if [ -z "$_rrc_branch" ]; then
+    echo "RESULT=detached_head"
+    return 1
+  fi
+
+  if ! git remote get-url origin >/dev/null 2>&1; then
+    echo "RESULT=no_origin"
+    echo "CURRENT_BRANCH=$_rrc_branch"
+    return 1
+  fi
+
+  _rrc_default=$(detect_default_branch || true)
+  if [ -z "$_rrc_default" ]; then
+    echo "RESULT=default_branch_unknown"
+    echo "CURRENT_BRANCH=$_rrc_branch"
+    return 1
+  fi
+
+  # Export to caller's scope
+  CURRENT_BRANCH="$_rrc_branch"
+  DEFAULT_BRANCH="$_rrc_default"
+  return 0
 }
 
 state_file_path() {

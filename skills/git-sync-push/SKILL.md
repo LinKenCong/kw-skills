@@ -7,7 +7,7 @@ description: >
   before pushing, rebase onto main/master and push, or similar requests in English or Chinese
   such as "推送代码", "同步并推送", "提交推送", "推到远程". If the user also wants PR help,
   summarize the branch diff as text only; do not create a PR and do not use gh or browser automation.
-allowed-tools: Bash, Read
+allowed-tools: terminal, file
 ---
 
 # Git Sync & Push
@@ -46,7 +46,7 @@ In this environment, `git fetch`, `git rebase`, `git stash`, and `git push` may 
 
 Open these only when needed:
 
-- `scripts/common.sh`: shared helpers for branch detection, default-branch detection, rebase detection, and section output
+- `scripts/common.sh`: shared helpers — `require_repo_context` gate, branch/default-branch detection, rebase detection, and section output
 - `scripts/preflight.sh`: read-only repo checks
 - `scripts/sync.sh`: optional stash, fetch, rebase, stash restore, and sync-state recording
 - `scripts/push_plan.sh`: push decision summary
