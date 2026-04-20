@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 0; padding: 12px; font-size: 12px; background: #fff; }
+  .card { padding: 10px 12px; border-radius: 8px; margin-bottom: 8px; font-size: 12px; }
+  #bridge { background: #f0f0f0; color: #888; }
+  #bridge.ok { background: #e3f9e5; color: #1a7f37; }
+  #bridge.error { background: #ffeef0; color: #cf222e; }
+  #status { background: #f6f8fa; color: #666; min-height: 18px; }
+  #status.ok { background: #e3f9e5; color: #1a7f37; }
+  #status.error { background: #ffeef0; color: #cf222e; }
+  #status.working { background: #fff8c5; color: #7d6b00; }
+  .hint { font-size: 11px; color: #888; line-height: 1.5; margin-bottom: 10px; }
+  .btn-row { display: flex; gap: 6px; margin-bottom: 8px; }
+  button { flex: 1; padding: 8px; border: none; border-radius: 6px; background: #111827; color: #fff; cursor: pointer; font-size: 12px; }
+  button:hover { background: #1f2937; }
+  button:active { background: #374151; }
+  button.secondary { background: #e5e7eb; color: #374151; }
+  button.secondary:hover { background: #d1d5db; }
+  #log { margin-top: 6px; font-size: 10px; color: #999; height: 80px; overflow-y: auto; border-top: 1px solid #f0f0f0; padding-top: 6px; }
+</style>
+</head>
+<body>
+<div id="bridge" class="card">Bridge SSE 连接中...</div>
+<div id="status" class="card">等待命令...</div>
+<p class="hint">插件通过 SSE 接收 Bridge 指令自动提取。</p>
+<div class="btn-row">
+  <button class="secondary" onclick="reconnect()">重连 SSE</button>
+</div>
+<div id="log"></div>
+
+<script>
+const BRIDGE_URL = 'http://localhost:3333';
+let eventSource = null;
+let lastBridgeKey = '';
+
+function escapeHtml(str) {
+  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function appendLog(text) {
+  const log = document.getElementById('log');
+  log.innerHTML = escapeHtml(new Date().toLocaleTimeString()) + ' ' + escapeHtml(text) + '<br>' + log.innerHTML;
+}
+
+function setStatus(text, state) {
+  const el = document.getElementById('status');
+  el.textContent = text;
+  el.className = 'card ' + (state || '');
+  appendLog(text);
+}
+
+function setBridge(text, state) {
+  const el = document.getElementById('bridge');
+  el.textContent = text;
+  el.className = 'card ' + (state || '');
+  const key = text + '|' + (state || '');
+  if (lastBridgeKey !== key) {
+    lastBridgeKey = key;
+    appendLog(text);
+  }
+}
+
+function forwardToPlugin(type, payload) {
+  parent.postMessage({ pluginMessage: { type, payload } }, '*');
+}
+
+function connectSse() {
+  if (eventSource) {
+    eventSource.close();
+  }
+
+  setBridge('Bridge SSE 连接中...', '');
+  eventSource = new EventSource(BRIDGE_URL + '/events');
+
+  eventSource.addEventListener('ready', function () {
+    setBridge('Bridge SSE 已连接', 'ok');
+  });
+
+  eventSource.addEventListener('extract', function (event) {
+    try {
+      const payload = JSON.parse(event.data || '{}');
+      if (!payload.jobId) {
+        setBridge('收到无效 extract job', 'error');
+        return;
+      }
+      setStatus('收到提取任务 ' + payload.jobId.slice(0, 8), 'working');
+      forwardToPlugin('extract', payload);
+    } catch (error) {
+      setBridge('事件解析失败', 'error');
+    }
+  });
+
+  eventSource.addEventListener('extract-selection', function (event) {
+    try {
+      const payload = JSON.parse(event.data || '{}');
+      if (!payload.jobId) {
+        setBridge('收到无效 extract-selection job', 'error');
+        return;
+      }
+      setStatus('收到选区提取任务 ' + payload.jobId.slice(0, 8), 'working');
+      forwardToPlugin('extract-selection', payload);
+    } catch (error) {
+      setBridge('事件解析失败', 'error');
+    }
+  });
+
+  eventSource.onerror = function () {
+    setBridge('Bridge SSE 已断开，等待重连...', 'error');
+  };
+}
+
+function reconnect() {
+  connectSse();
+}
+
+window.onmessage = function (event) {
+  const msg = event.data && event.data.pluginMessage;
+  if (!msg) return;
+
+  if (msg.type === 'status') {
+    setStatus(msg.text, msg.state);
+  }
+
+  if (msg.type === 'post-result') {
+    fetch(BRIDGE_URL + '/jobs/' + encodeURIComponent(msg.jobId) + '/result', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(msg.data),
+    })
+    .then(function () { setStatus('结果已发送 ✓', 'ok'); })
+    .catch(function () { setStatus('结果发送失败', 'error'); });
+  }
+
+  if (msg.type === 'post-asset') {
+    fetch(BRIDGE_URL + '/jobs/' + encodeURIComponent(msg.jobId) + '/asset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(msg.data),
+    })
+    .then(function () { appendLog('资产已发送: ' + (msg.data.fileName || msg.data.format)); })
+    .catch(function () { appendLog('资产发送失败'); });
+  }
+};
+
+connectSse();
+</script>
+</body>
+</html>

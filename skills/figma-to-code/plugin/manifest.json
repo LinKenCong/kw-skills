@@ -1,0 +1,13 @@
+{
+  "name": "Figma Bridge Extractor",
+  "id": "figma-bridge-extractor-dev",
+  "api": "1.0.0",
+  "main": "code.js",
+  "ui": "ui.html",
+  "editorType": ["figma"],
+  "networkAccess": {
+    "allowedDomains": ["http://localhost:3333"],
+    "devAllowedDomains": ["http://localhost:3333"],
+    "reasoning": "Communicates with the local bridge server for design data extraction."
+  }
+}

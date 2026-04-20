@@ -1,0 +1,11 @@
+{
+  "name": "figma-to-code",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "pixelmatch": "^6.0.0",
+    "pngjs": "^7.0.0",
+    "puppeteer": "^24.0.0",
+    "sharp": "^0.33.0"
+  }
+}
