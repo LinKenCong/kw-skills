@@ -10,13 +10,12 @@ const __dirname = path.dirname(__filename);
 
 const PORT = 3333;
 const CACHE_ROOT = path.join(__dirname, 'cache');
-const EXTRACT_TIMEOUT_MS = 60_000;
+const BASE_EXTRACT_TIMEOUT_MS = 60_000;
+const CAPABILITIES_FILE = path.join(__dirname, 'plugin', 'capabilities.json');
 
 const sseClients = new Set();
 const pendingJobs = new Map();
 const startedAt = Date.now();
-
-// ── Figma URL parsing ──
 
 function parseFigmaInput(input) {
   const trimmed = decodeURIComponent(String(input).trim());
@@ -42,7 +41,46 @@ function sanitizePathSegment(value) {
   return String(value || 'unknown').replace(/[^a-zA-Z0-9._-]+/g, '-');
 }
 
-// ── SSE management ──
+export function resolveSafeRelativePath(baseDir, relativePath) {
+  if (typeof relativePath !== 'string') {
+    throw new Error('relativePath must be a string');
+  }
+
+  const trimmed = relativePath.trim();
+  if (!trimmed) {
+    throw new Error('relativePath must not be empty');
+  }
+  if (trimmed.includes('\0')) {
+    throw new Error('relativePath must not contain null bytes');
+  }
+  if (path.isAbsolute(trimmed)) {
+    throw new Error('relativePath must stay within cache directory');
+  }
+
+  const resolvedBaseDir = path.resolve(baseDir);
+  const resolvedFilePath = path.resolve(resolvedBaseDir, trimmed);
+  const relativeToBase = path.relative(resolvedBaseDir, resolvedFilePath);
+
+  if (!relativeToBase || relativeToBase === '.') {
+    throw new Error('relativePath must resolve to a file within cache directory');
+  }
+  if (relativeToBase === '..' || relativeToBase.startsWith(`..${path.sep}`) || path.isAbsolute(relativeToBase)) {
+    throw new Error('relativePath must stay within cache directory');
+  }
+
+  return resolvedFilePath;
+}
+
+function loadCapabilitiesRegistry() {
+  if (!fs.existsSync(CAPABILITIES_FILE)) {
+    return { ok: false, error: `Capability registry not found: ${CAPABILITIES_FILE}` };
+  }
+  try {
+    return { ok: true, ...JSON.parse(fs.readFileSync(CAPABILITIES_FILE, 'utf-8')) };
+  } catch (error) {
+    return { ok: false, error: `Failed to parse capability registry: ${error.message}` };
+  }
+}
 
 function addSseClient(response) {
   response.writeHead(200, {
@@ -75,20 +113,34 @@ function hasPluginConnection() {
   return sseClients.size > 0;
 }
 
-// ── Job management ──
+function resolveJobTimeoutMs(type, options) {
+  let workUnits = 1;
+
+  if (options && (options.screenshot || options.pageScreenshots || options.selectionUnionScreenshot || options.nodeScreenshots)) {
+    workUnits += 2;
+  }
+  if (type === 'extract-pages' || type === 'extract-selected-pages-bundle') {
+    workUnits += 1;
+  }
+
+  return BASE_EXTRACT_TIMEOUT_MS * workUnits;
+}
 
 function createJob(type, target, options) {
   const jobId = randomUUID();
+  const timeoutMs = resolveJobTimeoutMs(type, options || {});
   const job = {
     jobId,
     type,
     target,
     options: options || {},
     createdAt: new Date().toISOString(),
+    timeoutMs,
     resolve: null,
     reject: null,
     timer: null,
     assets: [],
+    preparedBaseDirs: new Set(),
   };
 
   const promise = new Promise((resolve, reject) => {
@@ -99,9 +151,9 @@ function createJob(type, target, options) {
   job.timer = setTimeout(() => {
     if (pendingJobs.has(jobId)) {
       pendingJobs.delete(jobId);
-      job.reject(new Error('extraction timeout after ' + EXTRACT_TIMEOUT_MS + 'ms'));
+      job.reject(new Error('extraction timeout after ' + timeoutMs + 'ms'));
     }
-  }, EXTRACT_TIMEOUT_MS);
+  }, timeoutMs);
 
   pendingJobs.set(jobId, job);
   return { job, promise };
@@ -118,15 +170,12 @@ function resolveJob(jobId, result) {
   if (result.error) {
     job.reject(new Error(result.error));
   } else {
-    const assetFiles = job.assets;
-    job.resolve({ ...result, assetFiles });
+    job.resolve({ ...result, assetFiles: job.assets });
   }
   return true;
 }
 
-// ── Cache persistence ──
-
-function resolveCacheDir(fileKey, nodeId) {
+function resolveLegacyCacheDir(fileKey, nodeId) {
   return path.join(
     CACHE_ROOT,
     sanitizePathSegment(fileKey),
@@ -134,47 +183,176 @@ function resolveCacheDir(fileKey, nodeId) {
   );
 }
 
-function writeExtractionToCache(result) {
+function resolveBundleCacheDir(bundleId) {
+  return path.join(CACHE_ROOT, 'bundles', sanitizePathSegment(bundleId));
+}
+
+function writeJsonFile(filePath, data) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+}
+
+function normalizeDirPath(dirPath) {
+  return path.resolve(dirPath);
+}
+
+function resetDirectory(dirPath) {
+  fs.rmSync(dirPath, { recursive: true, force: true });
+  fs.mkdirSync(dirPath, { recursive: true });
+}
+
+export function prepareJobOutputDir(job, dirPath) {
+  const normalizedDir = normalizeDirPath(dirPath);
+  if (!job || !job.preparedBaseDirs) {
+    resetDirectory(normalizedDir);
+    return normalizedDir;
+  }
+  if (!job.preparedBaseDirs.has(normalizedDir)) {
+    resetDirectory(normalizedDir);
+    job.preparedBaseDirs.add(normalizedDir);
+  }
+  return normalizedDir;
+}
+
+function writeExtractionToCache(result, job) {
   const fileKey = result.meta?.fileKey || 'unknown-file';
   const nodeId = result.meta?.nodeId;
   if (!nodeId) {
     return null;
   }
 
-  const cacheDir = resolveCacheDir(fileKey, nodeId);
-  fs.mkdirSync(cacheDir, { recursive: true });
-  fs.writeFileSync(
-    path.join(cacheDir, 'extraction.json'),
-    JSON.stringify(result, null, 2)
-  );
+  const cacheDir = resolveLegacyCacheDir(fileKey, nodeId);
+  prepareJobOutputDir(job, cacheDir);
+  writeJsonFile(path.join(cacheDir, 'extraction.json'), result);
+
+  if (result.pageInfo) {
+    writeJsonFile(path.join(cacheDir, 'page.json'), result.pageInfo);
+  }
+  if (result.regions?.level1) {
+    writeJsonFile(path.join(cacheDir, 'regions.level1.json'), { regions: result.regions.level1 });
+  }
+  if (result.regions?.level2) {
+    writeJsonFile(path.join(cacheDir, 'regions.level2.json'), { regions: result.regions.level2 });
+  }
+  if (Array.isArray(result.screenshots)) {
+    writeJsonFile(path.join(cacheDir, 'screenshots', 'manifest.json'), { screenshots: result.screenshots });
+  }
 
   return cacheDir;
 }
 
-function writeAssetToCache(fileKey, nodeId, asset) {
-  const cacheDir = resolveCacheDir(fileKey, nodeId);
+function summarizePageEntry(bundleCacheDir, pageEntry) {
+  const pageId = pageEntry.pageId || pageEntry.pageInfo?.pageId;
+  const pageName = pageEntry.pageName || pageEntry.pageInfo?.pageName;
+  const pageDir = path.join(bundleCacheDir, 'pages', sanitizePathSegment(pageId));
+  fs.mkdirSync(pageDir, { recursive: true });
+
+  const pageInfo = {
+    pageId,
+    pageName,
+    nodeCount: pageEntry.pageInfo?.nodeCount ?? 0,
+    selectionCount: pageEntry.pageInfo?.selectionCount ?? 0,
+    sourceMode: pageEntry.pageInfo?.sourceMode || null,
+    rootNodeId: pageEntry.pageInfo?.rootNodeId || pageEntry.extraction?.meta?.nodeId || null,
+    screenshotCount: Array.isArray(pageEntry.screenshots) ? pageEntry.screenshots.length : 0,
+    path: `pages/${sanitizePathSegment(pageId)}/page.json`,
+  };
+
+  writeJsonFile(path.join(pageDir, 'page.json'), pageInfo);
+  if (pageEntry.extraction) {
+    writeJsonFile(path.join(pageDir, 'extraction.json'), pageEntry.extraction);
+  }
+  if (pageEntry.regions?.level1) {
+    writeJsonFile(path.join(pageDir, 'regions.level1.json'), { regions: pageEntry.regions.level1 });
+  }
+  if (pageEntry.regions?.level2) {
+    writeJsonFile(path.join(pageDir, 'regions.level2.json'), { regions: pageEntry.regions.level2 });
+  }
+  if (Array.isArray(pageEntry.screenshots)) {
+    writeJsonFile(path.join(pageDir, 'screenshots', 'manifest.json'), { screenshots: pageEntry.screenshots });
+  }
+
+  return pageInfo;
+}
+
+function writeBundleToCache(bundleResult, job) {
+  const bundleId = bundleResult.bundleId;
+  if (!bundleId) return null;
+
+  const cacheDir = resolveBundleCacheDir(bundleId);
+  prepareJobOutputDir(job, cacheDir);
+
+  const pageEntries = Array.isArray(bundleResult.pages) ? bundleResult.pages : [];
+  const pageSummaries = [];
+  const screenshotEntries = [];
+  const regionEntries = [];
+
+  for (const pageEntry of pageEntries) {
+    const pageSummary = summarizePageEntry(cacheDir, pageEntry);
+    pageSummaries.push(pageSummary);
+
+    if (Array.isArray(pageEntry.screenshots)) {
+      screenshotEntries.push(...pageEntry.screenshots);
+    }
+    if (pageEntry.regions?.level1) {
+      regionEntries.push(...pageEntry.regions.level1);
+    }
+    if (pageEntry.regions?.level2) {
+      regionEntries.push(...pageEntry.regions.level2);
+    }
+  }
+
+  writeJsonFile(path.join(cacheDir, 'bundle.json'), {
+    schemaVersion: bundleResult.schemaVersion || 1,
+    kind: bundleResult.kind || 'figma-bundle',
+    bundleId,
+    bundleName: bundleResult.bundleName || bundleId,
+    createdAt: bundleResult.createdAt || new Date().toISOString(),
+    source: bundleResult.source || null,
+    fileName: bundleResult.fileName || null,
+    pages: pageSummaries.map((page) => page.pageId),
+  });
+
+  writeJsonFile(path.join(cacheDir, 'indexes', 'pages.json'), { pages: pageSummaries });
+  writeJsonFile(path.join(cacheDir, 'indexes', 'screenshots.json'), { screenshots: screenshotEntries });
+  writeJsonFile(path.join(cacheDir, 'indexes', 'regions.json'), { regions: regionEntries });
+
+  return cacheDir;
+}
+
+function persistResult(result, job) {
+  if (result && (result.kind === 'figma-bundle' || result.bundleId)) {
+    return writeBundleToCache(result, job);
+  }
+  return writeExtractionToCache(result, job);
+}
+
+export function writeBase64ToRelativePath(baseDir, relativePath, base64Data) {
+  const filePath = resolveSafeRelativePath(baseDir, relativePath);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, Buffer.from(base64Data, 'base64'));
+  return filePath;
+}
+
+function writeAssetToLegacyCache(fileKey, nodeId, asset) {
+  const cacheDir = resolveLegacyCacheDir(fileKey, nodeId);
   const assetsDir = path.join(cacheDir, 'assets');
   fs.mkdirSync(assetsDir, { recursive: true });
 
   const rawFileName = asset.fileName || `${sanitizePathSegment(asset.nodeId)}.${asset.format.toLowerCase()}`;
   const fileName = path.basename(sanitizePathSegment(rawFileName));
   const filePath = path.join(assetsDir, fileName);
-  const buffer = Buffer.from(asset.base64, 'base64');
-  fs.writeFileSync(filePath, buffer);
-
+  fs.writeFileSync(filePath, Buffer.from(asset.base64, 'base64'));
   return filePath;
 }
 
-function writeScreenshotToCache(fileKey, nodeId, base64Data) {
-  const cacheDir = resolveCacheDir(fileKey, nodeId);
+function writeScreenshotToLegacyCache(fileKey, nodeId, base64Data) {
+  const cacheDir = resolveLegacyCacheDir(fileKey, nodeId);
   fs.mkdirSync(cacheDir, { recursive: true });
-
   const filePath = path.join(cacheDir, 'screenshot.png');
   fs.writeFileSync(filePath, Buffer.from(base64Data, 'base64'));
   return filePath;
 }
-
-// ── HTTP helpers ──
 
 const MAX_BODY_SIZE = 50 * 1024 * 1024;
 
@@ -233,8 +411,6 @@ function sendCors(response) {
   response.end();
 }
 
-// ── Route handlers ──
-
 function handleHealth(_request, response) {
   sendJson(response, 200, {
     ok: true,
@@ -243,8 +419,39 @@ function handleHealth(_request, response) {
   });
 }
 
+function handleCapabilities(_request, response) {
+  const registry = loadCapabilitiesRegistry();
+  sendJson(response, registry.ok ? 200 : 500, registry);
+}
+
 function handleEvents(_request, response) {
   addSseClient(response);
+}
+
+async function dispatchJob(response, type, target, options) {
+  if (!hasPluginConnection()) {
+    sendJson(response, 503, {
+      ok: false,
+      errorCode: 'NO_PLUGIN_CONNECTION',
+      message: 'No Figma plugin connected. Open Figma Desktop, run the plugin, and retry.',
+    });
+    return;
+  }
+
+  const { job, promise } = createJob(type, target, options || {});
+  broadcastSse(type, {
+    jobId: job.jobId,
+    target: job.target,
+    options: job.options,
+  });
+
+  try {
+    const result = await promise;
+    const cacheDir = persistResult(result, job);
+    safeSendJson(response, 200, { ok: true, cacheDir, result });
+  } catch (error) {
+    safeSendJson(response, 504, { ok: false, error: `extraction failed: ${error.message}` });
+  }
 }
 
 async function handleExtract(request, response) {
@@ -254,66 +461,31 @@ async function handleExtract(request, response) {
     return;
   }
 
-  if (!hasPluginConnection()) {
-    sendJson(response, 503, {
-      ok: false,
-      errorCode: 'NO_PLUGIN_CONNECTION',
-      message: 'No Figma plugin connected. Open Figma Desktop, run the plugin, and retry.',
-    });
-    return;
-  }
-
   const parsed = parseFigmaInput(body.input);
-  const options = body.options || {};
-
-  const { job, promise } = createJob('extract', {
+  await dispatchJob(response, 'extract', {
     input: body.input,
     fileKey: parsed.fileKey,
     nodeId: parsed.nodeId,
-  }, options);
-
-  broadcastSse('extract', {
-    jobId: job.jobId,
-    target: job.target,
-    options: job.options,
-  });
-
-  try {
-    const result = await promise;
-    const cacheDir = writeExtractionToCache(result);
-    safeSendJson(response, 200, { ok: true, cacheDir, result });
-  } catch (error) {
-    safeSendJson(response, 504, { ok: false, error: `extraction failed: ${error.message}` });
-  }
+  }, body.options || {});
 }
 
 async function handleExtractSelection(request, response) {
   const body = (await readBody(request)) || {};
+  await dispatchJob(response, 'extract-selection', {}, body.options || {});
+}
 
-  if (!hasPluginConnection()) {
-    sendJson(response, 503, {
-      ok: false,
-      errorCode: 'NO_PLUGIN_CONNECTION',
-      message: 'No Figma plugin connected. Open Figma Desktop, run the plugin, and retry.',
-    });
+async function handleExtractPages(request, response) {
+  const body = (await readBody(request)) || {};
+  if (!Array.isArray(body.pages) || body.pages.length === 0) {
+    sendJson(response, 400, { ok: false, error: 'missing pages array' });
     return;
   }
+  await dispatchJob(response, 'extract-pages', { pages: body.pages }, body.options || {});
+}
 
-  const options = body.options || {};
-  const { job, promise } = createJob('extract-selection', {}, options);
-
-  broadcastSse('extract-selection', {
-    jobId: job.jobId,
-    options: job.options,
-  });
-
-  try {
-    const result = await promise;
-    const cacheDir = writeExtractionToCache(result);
-    safeSendJson(response, 200, { ok: true, cacheDir, result });
-  } catch (error) {
-    safeSendJson(response, 504, { ok: false, error: `extraction failed: ${error.message}` });
-  }
+async function handleExtractSelectedPagesBundle(request, response) {
+  const body = (await readBody(request)) || {};
+  await dispatchJob(response, 'extract-selected-pages-bundle', {}, body.options || {});
 }
 
 async function handleJobResult(request, response, jobId) {
@@ -345,27 +517,58 @@ async function handleJobAsset(request, response, jobId) {
     return;
   }
 
-  const fileKey = job.target?.fileKey || 'unknown-file';
-  const rootNodeId = body.rootNodeId || job.target?.nodeId || body.nodeId || 'unknown-node';
+  let baseDir = null;
+  let filePath = null;
+  let relativePath = body.relativePath || null;
 
-  if (body.isScreenshot) {
-    const filePath = writeScreenshotToCache(fileKey, rootNodeId, body.base64);
-    job.assets.push({ type: 'screenshot', nodeId: body.nodeId || rootNodeId, filePath });
-  } else {
-    const filePath = writeAssetToCache(fileKey, rootNodeId, body);
-    job.assets.push({
-      type: 'export',
-      nodeId: body.nodeId || rootNodeId,
-      format: body.format,
-      fileName: body.fileName,
-      filePath,
-    });
+  if (body.bundleId) {
+    baseDir = resolveBundleCacheDir(body.bundleId);
   }
+
+  if (!baseDir && relativePath) {
+    const fileKey = job.target?.fileKey || 'unknown-file';
+    const rootNodeId = body.rootNodeId || job.target?.nodeId || body.nodeId || 'unknown-node';
+    baseDir = resolveLegacyCacheDir(fileKey, rootNodeId);
+  }
+
+  if (baseDir) {
+    try {
+      if (relativePath) {
+        resolveSafeRelativePath(baseDir, relativePath);
+      }
+    } catch (error) {
+      sendJson(response, 400, { ok: false, error: `invalid relativePath: ${error.message}` });
+      return;
+    }
+  }
+
+  if (baseDir && relativePath) {
+    prepareJobOutputDir(job, baseDir);
+    filePath = writeBase64ToRelativePath(baseDir, relativePath, body.base64);
+  } else if (body.isScreenshot) {
+    const fileKey = job.target?.fileKey || 'unknown-file';
+    const rootNodeId = body.rootNodeId || job.target?.nodeId || body.nodeId || 'unknown-node';
+    prepareJobOutputDir(job, resolveLegacyCacheDir(fileKey, rootNodeId));
+    filePath = writeScreenshotToLegacyCache(fileKey, rootNodeId, body.base64);
+    relativePath = 'screenshot.png';
+  } else {
+    const fileKey = job.target?.fileKey || 'unknown-file';
+    const rootNodeId = body.rootNodeId || job.target?.nodeId || body.nodeId || 'unknown-node';
+    prepareJobOutputDir(job, resolveLegacyCacheDir(fileKey, rootNodeId));
+    filePath = writeAssetToLegacyCache(fileKey, rootNodeId, body);
+  }
+
+  job.assets.push({
+    type: body.isScreenshot ? 'screenshot' : 'export',
+    screenshotKind: body.screenshotKind || null,
+    nodeId: body.nodeId || null,
+    pageId: body.pageId || null,
+    filePath,
+    relativePath,
+  });
 
   sendJson(response, 200, { ok: true });
 }
-
-// ── Request routing ──
 
 const server = http.createServer(async (request, response) => {
   if (request.method === 'OPTIONS') {
@@ -379,27 +582,46 @@ const server = http.createServer(async (request, response) => {
   try {
     if (request.method === 'GET' && pathname === '/health') {
       handleHealth(request, response);
-    } else if (request.method === 'GET' && pathname === '/events') {
-      handleEvents(request, response);
-    } else if (request.method === 'POST' && pathname === '/extract') {
-      await handleExtract(request, response);
-    } else if (request.method === 'POST' && pathname === '/extract-selection') {
-      await handleExtractSelection(request, response);
-    } else {
-      const jobResultMatch = pathname.match(/^\/jobs\/([^/]+)\/result$/);
-      if (request.method === 'POST' && jobResultMatch) {
-        await handleJobResult(request, response, jobResultMatch[1]);
-        return;
-      }
-
-      const jobAssetMatch = pathname.match(/^\/jobs\/([^/]+)\/asset$/);
-      if (request.method === 'POST' && jobAssetMatch) {
-        await handleJobAsset(request, response, jobAssetMatch[1]);
-        return;
-      }
-
-      sendJson(response, 404, { ok: false, error: 'not found' });
+      return;
     }
+    if (request.method === 'GET' && pathname === '/capabilities') {
+      handleCapabilities(request, response);
+      return;
+    }
+    if (request.method === 'GET' && pathname === '/events') {
+      handleEvents(request, response);
+      return;
+    }
+    if (request.method === 'POST' && pathname === '/extract') {
+      await handleExtract(request, response);
+      return;
+    }
+    if (request.method === 'POST' && pathname === '/extract-selection') {
+      await handleExtractSelection(request, response);
+      return;
+    }
+    if (request.method === 'POST' && pathname === '/extract-pages') {
+      await handleExtractPages(request, response);
+      return;
+    }
+    if (request.method === 'POST' && pathname === '/extract-selected-pages-bundle') {
+      await handleExtractSelectedPagesBundle(request, response);
+      return;
+    }
+
+    const jobResultMatch = pathname.match(/^\/jobs\/([^/]+)\/result$/);
+    if (request.method === 'POST' && jobResultMatch) {
+      await handleJobResult(request, response, jobResultMatch[1]);
+      return;
+    }
+
+    const jobAssetMatch = pathname.match(/^\/jobs\/([^/]+)\/asset$/);
+    if (request.method === 'POST' && jobAssetMatch) {
+      await handleJobAsset(request, response, jobAssetMatch[1]);
+      return;
+    }
+
+    sendJson(response, 404, { ok: false, error: 'not found' });
   } catch (error) {
     safeSendJson(response, 500, { ok: false, error: error.message });
   }
@@ -413,6 +635,10 @@ server.on('error', (err) => {
   throw err;
 });
 
-server.listen(PORT, '127.0.0.1', () => {
-  console.log(`Figma Bridge running at http://localhost:${PORT}`);
-});
+const isDirectRun = process.argv[1] && path.resolve(process.argv[1]) === __filename;
+
+if (isDirectRun) {
+  server.listen(PORT, '127.0.0.1', () => {
+    console.log(`Figma Bridge running at http://localhost:${PORT}`);
+  });
+}

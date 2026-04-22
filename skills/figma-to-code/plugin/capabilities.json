@@ -1,0 +1,232 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-04-22T10:00:00.000Z",
+  "model": "capability-registry",
+  "capabilities": [
+    {
+      "id": "bridge.health",
+      "status": "stable",
+      "layer": "bridge",
+      "purpose": "Report bridge/plugin connectivity and uptime.",
+      "bridge": {
+        "method": "GET",
+        "path": "/health"
+      },
+      "cli": {
+        "command": "node figma-to-code/scripts/bridge_client.mjs health"
+      },
+      "inputs": {},
+      "outputs": {
+        "ok": "boolean",
+        "pluginConnected": "boolean",
+        "uptime": "number"
+      },
+      "officialApi": []
+    },
+    {
+      "id": "extract.node",
+      "status": "stable",
+      "layer": "plugin",
+      "purpose": "Extract a single node by URL/nodeId into legacy-compatible extraction cache.",
+      "bridge": {
+        "method": "POST",
+        "path": "/extract",
+        "event": "extract"
+      },
+      "cli": {
+        "command": "node figma-to-code/scripts/bridge_client.mjs extract \"<figma-url-or-nodeId>\" [--assets] [--screenshot] [--node-screenshots]"
+      },
+      "inputs": {
+        "input": "figma URL or nodeId",
+        "options": ["exportAssets", "exportFormats", "screenshot", "nodeScreenshots"]
+      },
+      "outputs": {
+        "cache": "legacy extraction cache directory",
+        "result": "extraction schema v2+"
+      },
+      "officialApi": ["figma.getNodeByIdAsync", "exportAsync", "getStyledTextSegments", "boundVariables", "inferredVariables"]
+    },
+    {
+      "id": "extract.selection",
+      "status": "stable",
+      "layer": "plugin",
+      "purpose": "Extract current-page selection; multi-select exports node-scoped screenshots/assets instead of crop-derived screenshots.",
+      "bridge": {
+        "method": "POST",
+        "path": "/extract-selection",
+        "event": "extract-selection"
+      },
+      "cli": {
+        "command": "node figma-to-code/scripts/bridge_client.mjs extract-selection [--assets] [--screenshot] [--node-screenshots]"
+      },
+      "inputs": {
+        "options": ["exportAssets", "exportFormats", "screenshot", "nodeScreenshots"]
+      },
+      "outputs": {
+        "cache": "legacy extraction cache directory with screenshot manifest and region manifests when available",
+        "result": "extraction schema with multi-select metadata"
+      },
+      "officialApi": ["figma.currentPage.selection", "exportAsync", "getStyledTextSegments", "figma.root"]
+    },
+    {
+      "id": "extract.pages",
+      "status": "stable",
+      "layer": "plugin",
+      "purpose": "Extract one or more pages into a bundle cache with per-page metadata, screenshots, and region manifests.",
+      "bridge": {
+        "method": "POST",
+        "path": "/extract-pages",
+        "event": "extract-pages"
+      },
+      "cli": {
+        "command": "node figma-to-code/scripts/bridge_client.mjs extract-pages --pages \"Home,Pricing\" [--assets] [--page-screenshots] [--node-screenshots]"
+      },
+      "inputs": {
+        "pages": "comma-separated page ids or names",
+        "options": ["exportAssets", "pageScreenshots", "nodeScreenshots"]
+      },
+      "outputs": {
+        "cache": "bundle cache directory",
+        "result": "bundle schema with pages/indexes"
+      },
+      "officialApi": ["figma.root", "PageNode.selection", "exportAsync", "findAllWithCriteria", "figma.skipInvisibleInstanceChildren"]
+    },
+    {
+      "id": "extract-selected-pages-bundle",
+      "status": "stable",
+      "layer": "plugin",
+      "purpose": "Find all pages with persisted selection and extract them into a single bundle with page screenshots and node-scoped artifacts.",
+      "bridge": {
+        "method": "POST",
+        "path": "/extract-selected-pages-bundle",
+        "event": "extract-selected-pages-bundle"
+      },
+      "cli": {
+        "command": "node figma-to-code/scripts/bridge_client.mjs extract-selected-pages-bundle [--assets] [--page-screenshots] [--node-screenshots]"
+      },
+      "inputs": {
+        "options": ["exportAssets", "pageScreenshots", "nodeScreenshots"]
+      },
+      "outputs": {
+        "cache": "bundle cache directory",
+        "result": "bundle schema with selected pages only"
+      },
+      "officialApi": ["figma.root", "PageNode.selection", "exportAsync", "findAllWithCriteria", "figma.skipInvisibleInstanceChildren"]
+    },
+    {
+      "id": "query.capabilities",
+      "status": "stable",
+      "layer": "query",
+      "purpose": "Return the machine-readable capability registry used by the skill.",
+      "cli": {
+        "command": "node figma-to-code/scripts/bridge_client.mjs capabilities"
+      },
+      "inputs": {},
+      "outputs": {
+        "capabilities": "array"
+      },
+      "officialApi": []
+    },
+    {
+      "id": "query.pages",
+      "status": "stable",
+      "layer": "query",
+      "purpose": "List pages available in a bundle cache, or synthesize a single page summary from legacy extraction cache.",
+      "cli": {
+        "command": "node figma-to-code/scripts/bridge_client.mjs query pages --cache <cacheDir>"
+      },
+      "inputs": {
+        "cache": "legacy extraction cache or bundle cache"
+      },
+      "outputs": {
+        "pages": "array"
+      },
+      "officialApi": []
+    },
+    {
+      "id": "query.screenshots",
+      "status": "stable",
+      "layer": "query",
+      "purpose": "List available screenshots, with optional page filtering.",
+      "cli": {
+        "command": "node figma-to-code/scripts/bridge_client.mjs query screenshots --cache <cacheDir> [--page <pageId-or-name>]"
+      },
+      "inputs": {
+        "cache": "legacy extraction cache or bundle cache",
+        "page": "optional page id or page name"
+      },
+      "outputs": {
+        "screenshots": "array"
+      },
+      "officialApi": []
+    },
+    {
+      "id": "query.regions",
+      "status": "stable",
+      "layer": "query",
+      "purpose": "Return hierarchical region manifests or synthesized legacy regions, with optional page/level filters.",
+      "cli": {
+        "command": "node figma-to-code/scripts/bridge_client.mjs query regions --cache <cacheDir> [--page <pageId-or-name>] [--level 1|2]"
+      },
+      "inputs": {
+        "cache": "legacy extraction cache or bundle cache",
+        "page": "optional page id or page name",
+        "level": "optional numeric level"
+      },
+      "outputs": {
+        "regions": "array"
+      },
+      "officialApi": []
+    },
+    {
+      "id": "query.variables",
+      "status": "stable",
+      "layer": "query",
+      "purpose": "Return extracted variable catalog or flat token definitions.",
+      "cli": {
+        "command": "node figma-to-code/scripts/bridge_client.mjs query variables --cache <cacheDir>"
+      },
+      "inputs": {
+        "cache": "legacy extraction cache or bundle cache"
+      },
+      "outputs": {
+        "variables": "object"
+      },
+      "officialApi": []
+    },
+    {
+      "id": "query.components",
+      "status": "stable",
+      "layer": "query",
+      "purpose": "Return component-bearing nodes and main component metadata.",
+      "cli": {
+        "command": "node figma-to-code/scripts/bridge_client.mjs query components --cache <cacheDir>"
+      },
+      "inputs": {
+        "cache": "legacy extraction cache or bundle cache"
+      },
+      "outputs": {
+        "components": "array"
+      },
+      "officialApi": []
+    },
+    {
+      "id": "query.css",
+      "status": "stable",
+      "layer": "query",
+      "purpose": "Return CSS hints when extraction captured them; otherwise explain availability constraints.",
+      "cli": {
+        "command": "node figma-to-code/scripts/bridge_client.mjs query css --cache <cacheDir>"
+      },
+      "inputs": {
+        "cache": "legacy extraction cache or bundle cache"
+      },
+      "outputs": {
+        "available": "boolean",
+        "reason": "string",
+        "css": "object|null"
+      },
+      "officialApi": ["getCSSAsync"]
+    }
+  ]
+}

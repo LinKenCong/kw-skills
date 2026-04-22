@@ -2,182 +2,269 @@
 
 Inspiration from: https://github.com/About-JayX
 
-Extract design data from Figma Desktop via a local plugin + Bridge, then translate into production frontend code. No Figma MCP Server required.
+Extract design data from Figma Desktop through a local plugin + bridge, then query bundle/selection artifacts for restoration-oriented frontend work. No Figma MCP Server required.
 
 ## Architecture
 
-```
+```text
 Figma Desktop Plugin ←SSE→ Bridge (localhost:3333) ←HTTP→ CLI / Agent
 ```
 
-- **Plugin** (`plugin/`): Runs inside Figma Desktop. Extracts node data, exports SVG/PNG assets, and generates screenshots. Supports both single and multi-node selection.
-- **Bridge** (`bridge.mjs`): Local HTTP + SSE server. Relays communication between the Agent and the plugin. Persists extraction results to cache.
-- **CLI** (`scripts/bridge_client.mjs`): Command-line client used by the Agent to interact with the Bridge and query cached extraction data.
+- Plugin (`plugin/`): runs inside Figma Desktop, extracts nodes/pages/selections, emits bundle-aware metadata, exports assets/screenshots, and records capability boundaries.
+- Bridge (`bridge.mjs`): local HTTP + SSE server. Dispatches jobs to the plugin, persists legacy extraction caches and bundle caches, and exposes `/health` + `/capabilities`.
+- CLI (`scripts/bridge_client.mjs`): command-line entrypoint for health checks, extraction commands, capability inspection, and query commands.
+- Query (`scripts/query.mjs`): reads legacy extraction caches and bundle caches and returns pruned task-facing outputs.
+
+## What changed in this version
+
+The plugin is no longer only a single-node extractor. It now exposes stable capabilities for:
+- current selection extraction with richer screenshot artifacts
+- explicit page extraction
+- selected-pages bundle extraction (`PageNode.selection` across pages)
+- page / screenshot / region / variable / component / CSS queries
+- machine-readable capability discovery
+
+Human-readable capability reference:
+- `plugin/API_CAPABILITIES.md`
+
+Machine-readable registry:
+- `plugin/capabilities.json`
 
 ## Prerequisites
 
-- **Node.js** ≥ 18
-- **Figma Desktop** (not the browser version)
+- Node.js ≥ 18
+- Figma Desktop (not browser Figma)
 
 ## Installation
 
-### 1. Import the Figma Plugin (one-time)
+### 1. Import the Figma plugin
 
 1. Open Figma Desktop
 2. Go to Plugins → Development → Import plugin from manifest...
 3. Select `figma-to-code/plugin/manifest.json`
 
-### 2. Start the Bridge
+### 2. Start or ensure the bridge
 
 ```bash
-node figma-to-code/bridge.mjs
-# or auto-start via CLI
 node figma-to-code/scripts/bridge_client.mjs ensure
 ```
 
-### 3. Run the Plugin
+### 3. Run the plugin in the target file
 
-1. Open the target design file in Figma Desktop
+1. Open the design file in Figma Desktop
 2. Go to Plugins → Development → Figma Bridge Extractor
-3. Confirm the plugin UI shows "Bridge SSE Connected" (green)
+3. Confirm the plugin panel shows `Bridge SSE 已连接`
 
-## Usage
-
-### CLI Commands
+## Capability discovery
 
 ```bash
-# Check Bridge status
-node figma-to-code/scripts/bridge_client.mjs health
+node figma-to-code/scripts/bridge_client.mjs capabilities
+```
 
-# Ensure Bridge is running
-node figma-to-code/scripts/bridge_client.mjs ensure
+Use this before relying on a command you have not used recently. The registry is the authoritative list of stable capabilities.
 
-# Extract by Figma URL (with assets and screenshot)
+## Extraction commands
+
+### A. Single node by URL or nodeId
+
+```bash
 node figma-to-code/scripts/bridge_client.mjs extract "https://figma.com/design/abc123/MyFile?node-id=1-2" --assets --screenshot
-
-# Extract current selection (supports multi-select)
-node figma-to-code/scripts/bridge_client.mjs extract-selection --assets --screenshot
 ```
 
-### Multi-Select Support
-
-When multiple nodes are selected in Figma (Shift+click or drag-select), the plugin creates a **virtual group** (`VIRTUAL_GROUP`) as the root node:
-- Bounding box = union of all selected nodes
-- Each child's position is recalculated relative to the virtual root origin
-- `meta.isMultiSelect: true` and `meta.selectedNodeCount` indicate a multi-selection
-
-This allows extracting ungrouped elements that the designer did not organize into a parent frame.
-
-### Output
-
-Extraction results are saved to `cache/<fileKey>/<nodeId>/` (`:` in nodeId is replaced with `-`, e.g., `1:2` → `1-2`). When `fileKey` is unavailable (selection extractions), `unknown-file` is used as the directory name.
-
-| File | Description |
-|------|-------------|
-| `extraction.json` | Full design spec (layout, styles, text, variables, components, vector paths) |
-| `assets/*.svg` | Exported SVG vector graphics |
-| `assets/*@2x.png` | Exported 2x PNG images |
-| `screenshot.png` | Parent frame screenshot (when available) |
-
-### Query Commands
-
-Instead of reading `extraction.json` directly (which can be very large), use the CLI query commands to retrieve pruned, focused data on demand:
+Optional screenshot enrichments:
 
 ```bash
-# List available frames
-node figma-to-code/scripts/bridge_client.mjs query tree --cache <cacheDir>
-
-# Get component tree for a specific frame
-node figma-to-code/scripts/bridge_client.mjs query tree --cache <cacheDir> --frame Desktop --depth 3
-
-# Get pruned data for a single component subtree
-node figma-to-code/scripts/bridge_client.mjs query subtree <nodeId> --cache <cacheDir>
-
-# Get deduplicated color/font/spacing palette
-node figma-to-code/scripts/bridge_client.mjs query palette --cache <cacheDir> --frame Desktop
-
-# Get all text content
-node figma-to-code/scripts/bridge_client.mjs query text --cache <cacheDir> --frame Desktop
+node figma-to-code/scripts/bridge_client.mjs extract "1:2" --node-screenshots
 ```
 
-Query output is aggressively pruned: default values omitted, colors reduced to hex only, padding/border-radius shortened. A typical component subtree is 50–300 lines vs 30K+ for the full extraction.
+### B. Current selection
 
-### Design Fidelity Modes
+```bash
+node figma-to-code/scripts/bridge_client.mjs extract-selection --assets --screenshot --node-screenshots
+```
 
-The skill supports two implementation modes, chosen by the user after extraction:
+Notes:
+- `--screenshot` keeps the legacy `screenshot.png` behavior for downstream compatibility.
+- `--node-screenshots` adds direct per-node exports under `nodes/<nodeId>/screenshot.png`.
 
-| Mode | Goal | Data Source | Styling | Verification |
-|------|------|-------------|---------|-------------|
-| **High-fidelity** | Pixel-perfect match | query subtree + palette (all values) | Exact colors, fonts, spacing from design | Full regression checklist |
-| **Prototype** | Elements complete + reasonable layout | query tree + text (structure only) | Project design system tokens | Element completeness only |
+### C. Explicit pages → bundle cache
 
-### Figma → CSS Property Mapping
+```bash
+node figma-to-code/scripts/bridge_client.mjs extract-pages --pages "Home,Pricing" --page-screenshots --node-screenshots
+```
 
-| Figma | CSS |
-|-------|-----|
-| `layoutMode: VERTICAL` | `display: flex; flex-direction: column` |
-| `layoutMode: HORIZONTAL` | `display: flex; flex-direction: row` |
-| `primaryAxisAlignItems: CENTER` | `justify-content: center` |
-| `counterAxisAlignItems: CENTER` | `align-items: center` |
-| `itemSpacing: 12` | `gap: 12px` |
-| `paddingTop/Right/Bottom/Left` | `padding: ...` |
-| `clipsContent: true` | `overflow: hidden` |
-| `fills` | `background` |
-| `strokes + strokeWeight` | `border` |
-| `cornerRadius` | `border-radius` |
-| `effects (DROP_SHADOW)` | `box-shadow` |
+### D. All pages with persisted selection → bundle cache
+
+```bash
+node figma-to-code/scripts/bridge_client.mjs extract-selected-pages-bundle --page-screenshots --node-screenshots
+```
+
+This is the preferred restoration path when you keep selections on multiple pages and want a single evidence-rich bundle.
+
+## Cache layouts
+
+### Legacy extraction cache
+
+Used by `extract` and `extract-selection`.
+
+```text
+cache/<fileKey>/<nodeId>/
+  extraction.json
+  page.json
+  regions.level1.json
+  regions.level2.json
+  screenshot.png                # legacy compatibility screenshot
+  screenshots/
+    manifest.json
+    page.png
+  nodes/
+    <nodeId>/
+      screenshot.png
+      exports/
+      assets/
+  assets/
+    ...
+```
+
+### Bundle cache
+
+Used by `extract-pages` and `extract-selected-pages-bundle`.
+
+```text
+cache/bundles/<bundleId>/
+  bundle.json
+  indexes/
+    pages.json
+    screenshots.json
+    regions.json
+  pages/<pageId>/
+    page.json
+    extraction.json
+    regions.level1.json
+    regions.level2.json
+    screenshots/
+      manifest.json
+      page.png
+    nodes/
+      <nodeId>/
+        screenshot.png
+        exports/
+        assets/
+    assets/
+      ...
+```
+
+## Query commands
+
+Prefer query commands over directly reading `extraction.json` or bundle files.
+
+### Structure and legacy tree queries
+
+```bash
+node figma-to-code/scripts/bridge_client.mjs query tree --cache <cacheDir>
+node figma-to-code/scripts/bridge_client.mjs query tree --cache <cacheDir> --frame Hero --depth 2
+node figma-to-code/scripts/bridge_client.mjs query subtree <nodeId> --cache <cacheDir>
+node figma-to-code/scripts/bridge_client.mjs query text --cache <cacheDir>
+node figma-to-code/scripts/bridge_client.mjs query palette --cache <cacheDir>
+```
+
+### Bundle-aware queries
+
+```bash
+node figma-to-code/scripts/bridge_client.mjs query pages --cache <cacheDir>
+node figma-to-code/scripts/bridge_client.mjs query screenshots --cache <cacheDir> --page Home
+node figma-to-code/scripts/bridge_client.mjs query regions --cache <cacheDir> --page Home --level 1
+node figma-to-code/scripts/bridge_client.mjs query variables --cache <cacheDir>
+node figma-to-code/scripts/bridge_client.mjs query components --cache <cacheDir>
+node figma-to-code/scripts/bridge_client.mjs query css --cache <cacheDir>
+```
+
+## Design fidelity artifacts
+
+The most valuable outputs for restoration work are now:
+- bundle page list
+- page screenshots
+- direct per-node screenshots
+- node-scoped SVG/PNG exports and nested assets
+- level 1 / level 2 regions
+- component / variable / CSS hints
+
+These exist to support baseline-first and evidence-first workflows, not just one-shot code generation.
+
+## Notes on official Figma Plugin APIs
+
+The plugin is aligned with the official APIs most relevant to restoration work, including:
+- `PageNode.selection`
+- `figma.root`
+- `figma.currentPage.selection`
+- `exportAsync`
+- `getStyledTextSegments`
+- `findAllWithCriteria`
+- `figma.skipInvisibleInstanceChildren`
+- `getCSSAsync` (best effort)
+
+Important:
+- this project does not expose arbitrary raw Plugin API execution
+- mutation APIs are intentionally not surfaced as stable capabilities
+- `getCSSAsync()` may return unavailable depending on current mode/node support
+
+## Tests and checks
+
+```bash
+cd skills/figma-to-code
+npm test
+npm run check
+```
 
 ## Troubleshooting
 
-### NO_PLUGIN_CONNECTION
+### `NO_PLUGIN_CONNECTION`
 
 Bridge is running but no plugin is connected:
-1. Confirm Figma Desktop is open (not the browser version)
-2. Confirm the plugin has been imported via `plugin/manifest.json`
-3. Manually run the plugin in the target file
-4. Check the plugin UI for SSE connection status
+1. Confirm Figma Desktop is open
+2. Confirm the plugin was imported from `plugin/manifest.json`
+3. Run the plugin inside the correct Figma file
+4. Wait for `Bridge SSE 已连接` in the plugin UI
 
-### Extraction Timeout
+### No pages found for `extract-pages`
 
-Default timeout is 60 seconds. Large designs (100+ nodes) may take longer. Try selecting a smaller subtree to re-extract.
+- Confirm the names or page IDs match the open file exactly
+- Use the selected-pages bundle path if the workflow is selection-driven rather than full-page driven
 
-### Asset Export Failure
+### `extract-selected-pages-bundle` returns no pages
 
-Some node types (e.g., SLICE) may not support `exportAsync`. The plugin skips these nodes and continues extraction.
+- Each target page must retain its own `PageNode.selection`
+- Go page by page in Figma, keep the desired selection on each page, then rerun the command
 
-### CSP / Network Errors in Plugin Console
+### CSS query returns `available: false`
 
-If you see `Content Security Policy` errors when the plugin tries to connect to localhost, ensure `manifest.json` has:
-```json
-"networkAccess": {
-  "allowedDomains": ["http://localhost:3333"]
-}
-```
+This is expected when `getCSSAsync()` is unavailable for the current node/mode. Treat CSS hints as optional diagnostics, not the primary extraction schema.
 
-## File Structure
+## File structure
 
-```
+```text
 figma-to-code/
-├── SKILL.md                          # Agent workflow (5 phases)
-├── bridge.mjs                        # Bridge server
+├── SKILL.md
+├── bridge.mjs
 ├── plugin/
-│   ├── code.js                       # Plugin logic (extraction + multi-select)
-│   ├── ui.html                       # Plugin UI (SSE connection + controls)
-│   └── manifest.json                 # Figma plugin manifest
+│   ├── code.js
+│   ├── ui.html
+│   ├── manifest.json
+│   ├── capabilities.json
+│   └── API_CAPABILITIES.md
 ├── scripts/
-│   ├── bridge_client.mjs             # CLI client (extract + query commands)
-│   ├── pattern-scan.mjs              # HTML/CSS pattern checks for design drift
-│   ├── query.mjs                     # Query engine (pruning + filtering)
-│   ├── validate.mjs                  # Visual/structural validation entrypoint
-│   └── visual-diff.mjs               # Screenshot diffing utilities
+│   ├── bridge_client.mjs
+│   ├── query.mjs
+│   ├── pattern-scan.mjs
+│   ├── validate.mjs
+│   └── visual-diff.mjs
+├── tests/
+│   └── query.test.mjs
 ├── references/
-│   ├── coding-guide.md               # Layout/typography/component implementation guide
-│   ├── plugin-install.md             # Plugin installation guide
-│   └── regression-acceptance.md      # Visual acceptance checklist
-└── cache/                            # Extraction cache (git-ignored)
-    └── <fileKey>/<nodeId>/
-        ├── extraction.json
-        └── assets/
+│   ├── coding-guide.md
+│   ├── plugin-install.md
+│   └── regression-acceptance.md
+└── cache/
 ```
 
 ## License

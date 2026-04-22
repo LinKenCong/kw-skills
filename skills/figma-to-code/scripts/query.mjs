@@ -449,7 +449,7 @@ function collectPalette(node) {
 // ── CLI argument parsing ──
 
 function parseQueryArgs(args) {
-  const result = { subcommand: null, nodeId: null, cache: null, frame: null, depth: 3 };
+  const result = { subcommand: null, nodeId: null, cache: null, frame: null, page: null, level: null, depth: 3 };
   let i = 0;
 
   if (args.length > 0 && !args[0].startsWith('--')) {
@@ -469,6 +469,10 @@ function parseQueryArgs(args) {
       result.frame = args[++i];
     } else if (args[i] === '--depth' && i + 1 < args.length) {
       result.depth = parseInt(args[++i], 10);
+    } else if (args[i] === '--page' && i + 1 < args.length) {
+      result.page = args[++i];
+    } else if (args[i] === '--level' && i + 1 < args.length) {
+      result.level = parseInt(args[++i], 10);
     }
     i++;
   }
@@ -476,26 +480,387 @@ function parseQueryArgs(args) {
   return result;
 }
 
+function normalizeMatchValue(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function matchesPage(page, needle) {
+  if (!needle) return true;
+  const normalizedNeedle = normalizeMatchValue(needle);
+  return normalizeMatchValue(page.pageId) === normalizedNeedle || normalizeMatchValue(page.pageName) === normalizedNeedle;
+}
+
+function readJsonFile(filePath) {
+  return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+}
+
+function readJsonIfExists(filePath) {
+  if (!fs.existsSync(filePath)) return null;
+  try {
+    return readJsonFile(filePath);
+  } catch {
+    return null;
+  }
+}
+
+function sanitizePathSegment(value) {
+  return String(value || 'unknown').replace(/[^a-zA-Z0-9._-]+/g, '-');
+}
+
+function resolveCacheRelativePath(cacheDir, relativePath) {
+  if (typeof relativePath !== 'string' || !relativePath.trim()) return null;
+
+  const resolvedCacheDir = path.resolve(cacheDir);
+  const resolvedPath = path.resolve(resolvedCacheDir, relativePath);
+  const relativeToCache = path.relative(resolvedCacheDir, resolvedPath);
+  if (!relativeToCache || relativeToCache === '.') return null;
+  if (relativeToCache === '..' || relativeToCache.startsWith(`..${path.sep}`) || path.isAbsolute(relativeToCache)) return null;
+  return resolvedPath;
+}
+
+function loadCapabilities() {
+  const capabilitiesPath = path.resolve(new URL('../plugin/capabilities.json', import.meta.url).pathname);
+  const registry = readJsonIfExists(capabilitiesPath);
+  if (!registry || !Array.isArray(registry.capabilities)) {
+    return { ok: false, error: `Capability registry missing or invalid: ${capabilitiesPath}` };
+  }
+  return {
+    ok: true,
+    schemaVersion: registry.schemaVersion || 1,
+    generatedAt: registry.generatedAt || null,
+    registryPath: capabilitiesPath,
+    capabilities: registry.capabilities,
+  };
+}
+
+function resolveCacheContext(cacheDir) {
+  const bundlePath = path.join(cacheDir, 'bundle.json');
+  if (fs.existsSync(bundlePath)) {
+    const bundle = readJsonFile(bundlePath);
+    return {
+      ok: true,
+      kind: 'bundle',
+      cacheDir,
+      bundle,
+      pagesIndex: readJsonIfExists(path.join(cacheDir, 'indexes', 'pages.json')),
+      screenshotsIndex: readJsonIfExists(path.join(cacheDir, 'indexes', 'screenshots.json')),
+      regionsIndex: readJsonIfExists(path.join(cacheDir, 'indexes', 'regions.json')),
+    };
+  }
+
+  const extractionPath = path.join(cacheDir, 'extraction.json');
+  if (fs.existsSync(extractionPath)) {
+    return {
+      ok: true,
+      kind: 'legacy',
+      cacheDir,
+      extraction: readJsonFile(extractionPath),
+    };
+  }
+
+  return { ok: false, error: `No bundle.json or extraction.json found in ${cacheDir}` };
+}
+
+function getBundlePages(context) {
+  const indexedPages = context.pagesIndex && Array.isArray(context.pagesIndex.pages)
+    ? context.pagesIndex.pages
+    : null;
+  if (indexedPages) return indexedPages;
+  return [];
+}
+
+function getBundleScreenshots(context) {
+  if (context.screenshotsIndex && Array.isArray(context.screenshotsIndex.screenshots)) {
+    return context.screenshotsIndex.screenshots;
+  }
+  return [];
+}
+
+function getBundleRegions(context) {
+  if (context.regionsIndex && Array.isArray(context.regionsIndex.regions)) {
+    return context.regionsIndex.regions;
+  }
+  return [];
+}
+
+function getLegacyPageMeta(extraction) {
+  return {
+    pageId: extraction.meta?.pageId || 'legacy-page',
+    pageName: extraction.meta?.pageName || extraction.meta?.nodeName || extraction.root?.name || 'Legacy extraction',
+  };
+}
+
+function getBoxValue(box, key, fallbackKey) {
+  if (!box) return 0;
+  if (typeof box[key] === 'number') return box[key];
+  if (fallbackKey && typeof box[fallbackKey] === 'number') return box[fallbackKey];
+  return 0;
+}
+
+function makeRegionFromNode(node, pageMeta, level, parentRegionId) {
+  if (!node || !node.box) return null;
+  const box = node.box.absoluteBox || node.box;
+  return {
+    regionId: `${pageMeta.pageId}:${level}:${node.id}`,
+    pageId: pageMeta.pageId,
+    pageName: pageMeta.pageName,
+    level,
+    name: node.name,
+    nodeId: node.id,
+    parentRegionId: parentRegionId || null,
+    x: getBoxValue(box, 'x'),
+    y: getBoxValue(box, 'y'),
+    w: getBoxValue(box, 'width', 'w'),
+    h: getBoxValue(box, 'height', 'h'),
+  };
+}
+
+function buildLegacyRegions(extraction) {
+  const pageMeta = getLegacyPageMeta(extraction);
+  const root = extraction.root;
+  const regions = [];
+  if (!root || !Array.isArray(root.children)) return regions;
+
+  for (const child of root.children) {
+    if (!child || child.visible === false) continue;
+    const level1 = makeRegionFromNode(child, pageMeta, 1, null);
+    if (level1) regions.push(level1);
+    if (Array.isArray(child.children)) {
+      for (const grandChild of child.children) {
+        if (!grandChild || grandChild.visible === false) continue;
+        const level2 = makeRegionFromNode(grandChild, pageMeta, 2, level1 ? level1.regionId : null);
+        if (level2) regions.push(level2);
+      }
+    }
+  }
+
+  return regions;
+}
+
+function buildLegacyScreenshots(cacheDir, extraction) {
+  const manifest = readJsonIfExists(path.join(cacheDir, 'screenshots', 'manifest.json'));
+  if (manifest && Array.isArray(manifest.screenshots)) {
+    return manifest.screenshots;
+  }
+
+  const pageMeta = getLegacyPageMeta(extraction);
+  const screenshots = [];
+  if (extraction.assets?.screenshot) {
+    screenshots.push({
+      screenshotId: `legacy:${extraction.assets.screenshot.nodeId || extraction.meta?.nodeId || 'root'}:frame`,
+      pageId: pageMeta.pageId,
+      pageName: pageMeta.pageName,
+      kind: 'frame',
+      nodeId: extraction.assets.screenshot.nodeId || extraction.meta?.nodeId || null,
+      filePath: extraction.assets.screenshot.fileName || 'screenshot.png',
+      absolutePath: path.join(cacheDir, extraction.assets.screenshot.fileName || 'screenshot.png'),
+    });
+  }
+  return screenshots;
+}
+
+function collectComponents(node, output, pageMeta) {
+  if (!node || node.visible === false) return;
+  if (node.component) {
+    output.push({
+      pageId: pageMeta?.pageId || null,
+      pageName: pageMeta?.pageName || null,
+      nodeId: node.id,
+      nodeName: node.name,
+      type: node.type,
+      ...node.component,
+    });
+  }
+  if (Array.isArray(node.children)) {
+    for (const child of node.children) collectComponents(child, output, pageMeta);
+  }
+}
+
+function mergeFlatVariableMaps(target, source) {
+  if (!source || typeof source !== 'object') return;
+  for (const key of Object.keys(source)) {
+    if (!target[key]) target[key] = {};
+    Object.assign(target[key], source[key]);
+  }
+}
+
+function resolveBundlePageDir(context, pageEntry) {
+  const pageInfoPath = resolveCacheRelativePath(context.cacheDir, pageEntry.path);
+  if (pageInfoPath) {
+    return path.dirname(pageInfoPath);
+  }
+  return path.join(context.cacheDir, 'pages', sanitizePathSegment(pageEntry.pageId));
+}
+
+function getBundlePageExtractions(context) {
+  const pages = getBundlePages(context);
+  const entries = [];
+  for (const pageEntry of pages) {
+    const extractionPath = path.join(resolveBundlePageDir(context, pageEntry), 'extraction.json');
+    const extraction = readJsonIfExists(extractionPath);
+    if (extraction) {
+      entries.push({ page: pageEntry, extraction, extractionPath });
+    }
+  }
+  return entries;
+}
+
+function resolveExtractionForTreeQueries(context, opts) {
+  if (context.kind === 'legacy') {
+    return { ok: true, extraction: context.extraction };
+  }
+
+  const pageExtractions = getBundlePageExtractions(context);
+  if (pageExtractions.length === 0) {
+    return { ok: false, error: 'Bundle cache does not contain page extraction.json files yet' };
+  }
+
+  let selected = null;
+  if (opts.page) {
+    selected = pageExtractions.find((entry) => matchesPage(entry.page, opts.page));
+    if (!selected) {
+      return { ok: false, error: `Page "${opts.page}" not found in bundle cache` };
+    }
+  } else if (pageExtractions.length === 1) {
+    selected = pageExtractions[0];
+  } else {
+    return {
+      ok: false,
+      error: 'Bundle cache contains multiple pages. Use --page <pageId-or-name> or query pages first.',
+    };
+  }
+
+  return { ok: true, extraction: selected.extraction, page: selected.page };
+}
+
 // ── Main query handler ──
 
 export async function handleQuery(args) {
   const opts = parseQueryArgs(args);
 
+  if (opts.subcommand === 'capabilities') {
+    return loadCapabilities();
+  }
+
   if (!opts.cache) {
     return { ok: false, error: 'Missing --cache <cacheDir> argument' };
   }
 
-  const extractionPath = path.join(opts.cache, 'extraction.json');
-  if (!fs.existsSync(extractionPath)) {
-    return { ok: false, error: `extraction.json not found in ${opts.cache}` };
+  const context = resolveCacheContext(opts.cache);
+  if (!context.ok) {
+    return context;
   }
 
-  let extraction;
-  try {
-    extraction = JSON.parse(fs.readFileSync(extractionPath, 'utf-8'));
-  } catch (parseError) {
-    return { ok: false, error: `Failed to parse extraction.json: ${parseError.message}` };
+  if (opts.subcommand === 'pages') {
+    if (context.kind === 'bundle') {
+      return {
+        ok: true,
+        cacheKind: 'bundle',
+        bundleId: context.bundle.bundleId || null,
+        pages: getBundlePages(context),
+      };
+    }
+    const pageMeta = getLegacyPageMeta(context.extraction);
+    return {
+      ok: true,
+      cacheKind: 'legacy',
+      pages: [{
+        ...pageMeta,
+        nodeCount: countNodes(context.extraction.root),
+        selectionCount: context.extraction.meta?.selectedNodeCount || 1,
+        screenshotCount: buildLegacyScreenshots(context.cacheDir, context.extraction).length,
+      }],
+    };
   }
+
+  if (opts.subcommand === 'screenshots') {
+    const screenshots = context.kind === 'bundle'
+      ? getBundleScreenshots(context)
+      : buildLegacyScreenshots(context.cacheDir, context.extraction);
+    const filtered = opts.page ? screenshots.filter((entry) => matchesPage(entry, opts.page)) : screenshots;
+    return {
+      ok: true,
+      cacheKind: context.kind,
+      screenshots: filtered,
+    };
+  }
+
+  if (opts.subcommand === 'regions') {
+    const regions = context.kind === 'bundle'
+      ? getBundleRegions(context)
+      : buildLegacyRegions(context.extraction);
+    const filtered = regions.filter((entry) => {
+      if (opts.page && !matchesPage(entry, opts.page)) return false;
+      if (opts.level != null && entry.level !== opts.level) return false;
+      return true;
+    });
+    return {
+      ok: true,
+      cacheKind: context.kind,
+      regions: filtered,
+    };
+  }
+
+  if (opts.subcommand === 'variables') {
+    if (context.kind === 'legacy') {
+      return { ok: true, cacheKind: 'legacy', variables: context.extraction.variables || {} };
+    }
+    const merged = { flat: { colors: {}, numbers: {}, strings: {}, booleans: {} } };
+    for (const entry of getBundlePageExtractions(context)) {
+      mergeFlatVariableMaps(merged.flat, entry.extraction.variables?.flat);
+    }
+    return { ok: true, cacheKind: 'bundle', variables: merged };
+  }
+
+  if (opts.subcommand === 'components') {
+    const components = [];
+    if (context.kind === 'legacy') {
+      collectComponents(context.extraction.root, components, getLegacyPageMeta(context.extraction));
+    } else {
+      for (const entry of getBundlePageExtractions(context)) {
+        collectComponents(entry.extraction.root, components, entry.page);
+      }
+    }
+    return { ok: true, cacheKind: context.kind, components };
+  }
+
+  if (opts.subcommand === 'css') {
+    if (context.kind === 'legacy') {
+      const cssData = context.extraction.css || context.extraction.cssHints || null;
+      if (!cssData) {
+        return { ok: true, cacheKind: 'legacy', available: false, reason: 'No css hints recorded in this extraction cache', css: null };
+      }
+      return {
+        ok: true,
+        cacheKind: 'legacy',
+        available: cssData.available !== false,
+        reason: cssData.reason || null,
+        css: cssData.available === false ? null : cssData,
+      };
+    }
+
+    const pageExtractions = getBundlePageExtractions(context);
+    const pages = pageExtractions.map((entry) => ({
+      pageId: entry.page.pageId,
+      pageName: entry.page.pageName,
+      available: entry.extraction.css?.available !== false && !!entry.extraction.css,
+      reason: entry.extraction.css?.reason || (entry.extraction.css ? null : 'No css hints recorded for this page'),
+      css: entry.extraction.css?.available === false ? null : (entry.extraction.css || null),
+    }));
+    const available = pages.some((entry) => entry.available);
+    return {
+      ok: true,
+      cacheKind: 'bundle',
+      available,
+      reason: available ? null : 'No css hints recorded in this bundle cache',
+      pages,
+    };
+  }
+
+  const resolved = resolveExtractionForTreeQueries(context, opts);
+  if (!resolved.ok) return resolved;
+
+  const extraction = resolved.extraction;
 
   const root = extraction.root;
   if (!root) {
@@ -514,6 +879,14 @@ export async function handleQuery(args) {
 
   switch (opts.subcommand) {
     case 'tree': {
+      if (context.kind === 'bundle' && !opts.page && !opts.frame) {
+        return {
+          ok: true,
+          cacheKind: 'bundle',
+          bundleId: context.bundle.bundleId || null,
+          pages: getBundlePages(context),
+        };
+      }
       if (!opts.frame) {
         const frames = (root.children || []).map((c) => ({
           name: c.name,
@@ -568,7 +941,7 @@ export async function handleQuery(args) {
     default:
       return {
         ok: false,
-        error: 'Usage: query <tree|node|subtree|text|palette> [nodeId] --cache <dir> [--frame name] [--depth N]',
+        error: 'Usage: query <tree|node|subtree|text|palette|capabilities|pages|screenshots|regions|variables|components|css> [nodeId] --cache <dir> [--frame name] [--page name-or-id] [--level N] [--depth N]',
       };
   }
 }

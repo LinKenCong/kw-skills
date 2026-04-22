@@ -34,6 +34,7 @@
 const BRIDGE_URL = 'http://localhost:3333';
 let eventSource = null;
 let lastBridgeKey = '';
+const jobRequestQueues = new Map();
 
 function escapeHtml(str) {
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -66,6 +67,42 @@ function forwardToPlugin(type, payload) {
   parent.postMessage({ pluginMessage: { type, payload } }, '*');
 }
 
+function postBridgeJson(path, payload) {
+  return fetch(BRIDGE_URL + path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  }).then(function (response) {
+    if (!response.ok) {
+      throw new Error('HTTP ' + response.status);
+    }
+    return response;
+  });
+}
+
+function queueJobRequest(jobId, sender) {
+  const previous = jobRequestQueues.get(jobId) || Promise.resolve();
+  const next = previous.catch(function () {}).then(sender);
+  jobRequestQueues.set(jobId, next);
+  return next;
+}
+
+function registerJobEvent(eventName, label, forwardType) {
+  eventSource.addEventListener(eventName, function (event) {
+    try {
+      const payload = JSON.parse(event.data || '{}');
+      if (!payload.jobId) {
+        setBridge('收到无效 ' + eventName + ' job', 'error');
+        return;
+      }
+      setStatus('收到' + label + '任务 ' + payload.jobId.slice(0, 8), 'working');
+      forwardToPlugin(forwardType || eventName, payload);
+    } catch (error) {
+      setBridge('事件解析失败', 'error');
+    }
+  });
+}
+
 function connectSse() {
   if (eventSource) {
     eventSource.close();
@@ -78,33 +115,10 @@ function connectSse() {
     setBridge('Bridge SSE 已连接', 'ok');
   });
 
-  eventSource.addEventListener('extract', function (event) {
-    try {
-      const payload = JSON.parse(event.data || '{}');
-      if (!payload.jobId) {
-        setBridge('收到无效 extract job', 'error');
-        return;
-      }
-      setStatus('收到提取任务 ' + payload.jobId.slice(0, 8), 'working');
-      forwardToPlugin('extract', payload);
-    } catch (error) {
-      setBridge('事件解析失败', 'error');
-    }
-  });
-
-  eventSource.addEventListener('extract-selection', function (event) {
-    try {
-      const payload = JSON.parse(event.data || '{}');
-      if (!payload.jobId) {
-        setBridge('收到无效 extract-selection job', 'error');
-        return;
-      }
-      setStatus('收到选区提取任务 ' + payload.jobId.slice(0, 8), 'working');
-      forwardToPlugin('extract-selection', payload);
-    } catch (error) {
-      setBridge('事件解析失败', 'error');
-    }
-  });
+  registerJobEvent('extract', '提取', 'extract');
+  registerJobEvent('extract-selection', '选区提取', 'extract-selection');
+  registerJobEvent('extract-pages', '页面提取', 'extract-pages');
+  registerJobEvent('extract-selected-pages-bundle', '多页面 bundle 提取', 'extract-selected-pages-bundle');
 
   eventSource.onerror = function () {
     setBridge('Bridge SSE 已断开，等待重连...', 'error');
@@ -124,23 +138,25 @@ window.onmessage = function (event) {
   }
 
   if (msg.type === 'post-result') {
-    fetch(BRIDGE_URL + '/jobs/' + encodeURIComponent(msg.jobId) + '/result', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(msg.data),
+    queueJobRequest(msg.jobId, function () {
+      return postBridgeJson('/jobs/' + encodeURIComponent(msg.jobId) + '/result', msg.data);
     })
-    .then(function () { setStatus('结果已发送 ✓', 'ok'); })
-    .catch(function () { setStatus('结果发送失败', 'error'); });
+    .then(function () {
+      setStatus('结果已发送 ✓', 'ok');
+      jobRequestQueues.delete(msg.jobId);
+    })
+    .catch(function (error) {
+      setStatus('结果发送失败: ' + error.message, 'error');
+      jobRequestQueues.delete(msg.jobId);
+    });
   }
 
   if (msg.type === 'post-asset') {
-    fetch(BRIDGE_URL + '/jobs/' + encodeURIComponent(msg.jobId) + '/asset', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(msg.data),
+    queueJobRequest(msg.jobId, function () {
+      return postBridgeJson('/jobs/' + encodeURIComponent(msg.jobId) + '/asset', msg.data);
     })
     .then(function () { appendLog('资产已发送: ' + (msg.data.fileName || msg.data.format)); })
-    .catch(function () { appendLog('资产发送失败'); });
+    .catch(function (error) { appendLog('资产发送失败: ' + error.message); });
   }
 };
 

@@ -37,11 +37,12 @@ function safeRead(node, key) {
 }
 
 function sanitizeFileName(name) {
-  return String(name || 'untitled')
+  var sanitized = String(name || 'untitled')
     .replace(/[^a-zA-Z0-9_-]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .toLowerCase()
     .slice(0, 60);
+  return sanitized || 'untitled';
 }
 
 function countKeys(obj) { return Object.keys(obj || {}).length; }
@@ -702,7 +703,7 @@ async function extractNode(node, fileKey) {
   var variables = await buildVariablesDefs(variableCache);
   var page = findPage(node);
 
-  var extraction = {
+  return {
     version: 2,
     meta: {
       fileKey: fileKey || null,
@@ -721,9 +722,8 @@ async function extractNode(node, fileKey) {
       images: Object.keys(resourceCollector.images),
     },
     assets: { exports: [], screenshot: null },
+    css: await captureCssHints(node),
   };
-
-  return extraction;
 }
 
 async function extractMultipleNodes(nodes) {
@@ -801,28 +801,237 @@ async function extractMultipleNodes(nodes) {
       images: Object.keys(resourceCollector.images),
     },
     assets: { exports: [], screenshot: null },
+    css: {
+      available: false,
+      reason: 'getCSSAsync is not available for virtual multi-selection roots',
+    },
   };
 }
 
-// ══════════════════════════════════════════════
-// Error reporting
-// ══════════════════════════════════════════════
-
-function handleError(jobId, error) {
-  postToUi('post-result', { jobId: jobId, data: { error: error.message || String(error) } });
-  postToUi('status', { text: '执行失败: ' + (error.message || String(error)), state: 'error' });
+function countSerializedNodes(node) {
+  if (!node) return 0;
+  var count = 1;
+  if (node.children && Array.isArray(node.children)) {
+    for (var i = 0; i < node.children.length; i++) count += countSerializedNodes(node.children[i]);
+  }
+  return count;
 }
 
-// ══════════════════════════════════════════════
-// Asset export + result posting (shared logic)
-// ══════════════════════════════════════════════
+function sanitizeIdForPath(value) {
+  return String(value || 'unknown').replace(/[^a-zA-Z0-9._-]+/g, '-');
+}
 
-async function exportImageFills(jobId, rootNodeId, extraction) {
+function baseName(filePath) {
+  var parts = String(filePath || '').split('/');
+  return parts[parts.length - 1] || 'file';
+}
+
+function computePageContentBounds(page) {
+  if (!page || !page.children || page.children.length === 0) {
+    return { x: 0, y: 0, width: 0, height: 0 };
+  }
+  var nodes = [];
+  for (var i = 0; i < page.children.length; i++) {
+    if (page.children[i] && page.children[i].visible !== false && page.children[i].absoluteBoundingBox) {
+      nodes.push(page.children[i]);
+    }
+  }
+  if (nodes.length === 0) return { x: 0, y: 0, width: 0, height: 0 };
+  return computeUnionBoundingBox(nodes);
+}
+
+function buildRegionEntry(serializedNode, pageInfo, level, parentRegionId) {
+  if (!serializedNode || !serializedNode.box) return null;
+  var sourceBox = serializedNode.box.absoluteBox || serializedNode.box;
+  return {
+    regionId: pageInfo.pageId + ':' + level + ':' + serializedNode.id,
+    pageId: pageInfo.pageId,
+    pageName: pageInfo.pageName,
+    level: level,
+    name: serializedNode.name,
+    nodeId: serializedNode.id,
+    parentRegionId: parentRegionId || null,
+    x: typeof sourceBox.x === 'number' ? sourceBox.x : 0,
+    y: typeof sourceBox.y === 'number' ? sourceBox.y : 0,
+    w: typeof sourceBox.width === 'number' ? sourceBox.width : 0,
+    h: typeof sourceBox.height === 'number' ? sourceBox.height : 0,
+  };
+}
+
+function buildRegionsForExtraction(extraction, pageInfo) {
+  var level1 = [];
+  var level2 = [];
+  var root = extraction.root;
+  if (!root || !root.children || !Array.isArray(root.children)) return { level1: level1, level2: level2 };
+
+  for (var i = 0; i < root.children.length; i++) {
+    var child = root.children[i];
+    if (!child || child.visible === false) continue;
+    var parentRegion = buildRegionEntry(child, pageInfo, 1, null);
+    if (parentRegion) level1.push(parentRegion);
+
+    if (child.children && Array.isArray(child.children)) {
+      for (var j = 0; j < child.children.length; j++) {
+        var grandChild = child.children[j];
+        if (!grandChild || grandChild.visible === false) continue;
+        var nested = buildRegionEntry(grandChild, pageInfo, 2, parentRegion ? parentRegion.regionId : null);
+        if (nested) level2.push(nested);
+      }
+    }
+  }
+
+  return { level1: level1, level2: level2 };
+}
+
+function countPageNodesByTypes(page, types) {
+  if (!page || typeof page.findAllWithCriteria !== 'function') return null;
+  try {
+    return page.findAllWithCriteria({ types: types }).length;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function captureCssHints(node) {
+  if (!node || typeof node.getCSSAsync !== 'function') {
+    return { available: false, reason: 'getCSSAsync not available for this node type or mode' };
+  }
+  try {
+    return { available: true, css: await node.getCSSAsync() };
+  } catch (error) {
+    return {
+      available: false,
+      reason: error && error.message ? error.message : 'getCSSAsync unavailable in current mode',
+    };
+  }
+}
+
+function buildPageInfo(page, extraction, sourceMode, selectedNodes, pageBounds) {
+  var selectedNodeIds = [];
+  for (var i = 0; i < selectedNodes.length; i++) selectedNodeIds.push(selectedNodes[i].id);
+  return {
+    pageId: page ? page.id : null,
+    pageName: page ? page.name : null,
+    sourceMode: sourceMode,
+    rootNodeId: extraction.meta.nodeId,
+    rootNodeName: extraction.meta.nodeName,
+    rootNodeType: extraction.meta.nodeType,
+    selectionCount: selectedNodes.length,
+    selectedNodeIds: selectedNodeIds,
+    nodeCount: countSerializedNodes(extraction.root),
+    pageBounds: pageBounds,
+    stats: {
+      textNodeCount: countPageNodesByTypes(page, ['TEXT']),
+      instanceNodeCount: countPageNodesByTypes(page, ['INSTANCE']),
+      frameNodeCount: countPageNodesByTypes(page, ['FRAME']),
+    },
+  };
+}
+
+function buildNodeScopedRelativeDir(baseDir, nodeId) {
+  var prefix = baseDir ? baseDir + '/' : '';
+  return prefix + 'nodes/' + sanitizeIdForPath(nodeId);
+}
+
+function shouldIncludeDirectNodeScreenshots(options, selectedNodes) {
+  if (!selectedNodes || selectedNodes.length === 0) return false;
+  return !!(options.nodeScreenshots || (options.screenshot !== false && selectedNodes.length > 1));
+}
+
+function buildScreenshotEntries(page, pageInfo, selectedNodes, options, baseDir) {
+  var entries = [];
+  if (page && options.pageScreenshots) {
+    var pageScreenshotPath = baseDir ? baseDir + '/screenshots/page.png' : 'screenshots/page.png';
+    entries.push({
+      screenshotId: page.id + ':page',
+      pageId: pageInfo.pageId,
+      pageName: pageInfo.pageName,
+      kind: 'page',
+      nodeId: page.id,
+      filePath: pageScreenshotPath,
+      source: 'direct-export',
+    });
+  }
+
+  if (!shouldIncludeDirectNodeScreenshots(options, selectedNodes)) {
+    return entries;
+  }
+
+  var directNodes = makeUniqueNodes(selectedNodes || []);
+  for (var i = 0; i < directNodes.length; i++) {
+    var relativeDir = buildNodeScopedRelativeDir(baseDir, directNodes[i].id);
+    entries.push({
+      screenshotId: pageInfo.pageId + ':node:' + directNodes[i].id,
+      pageId: pageInfo.pageId,
+      pageName: pageInfo.pageName,
+      kind: 'node',
+      nodeId: directNodes[i].id,
+      nodeName: directNodes[i].name,
+      filePath: relativeDir + '/screenshot.png',
+      source: 'direct-export',
+    });
+  }
+
+  return entries;
+}
+
+function attachLegacyMetadata(extraction, page, selectedNodes, options, sourceMode) {
+  var pageBounds = computePageContentBounds(page);
+  extraction.pageInfo = buildPageInfo(page, extraction, sourceMode, selectedNodes, pageBounds);
+  extraction.regions = buildRegionsForExtraction(extraction, extraction.pageInfo);
+  extraction.screenshots = buildScreenshotEntries(page, extraction.pageInfo, selectedNodes, options, null);
+  return extraction;
+}
+
+function createBundleId(prefix) {
+  return sanitizeFileName(prefix || 'bundle') + '-' + Date.now();
+}
+
+function makeUniqueNodes(nodes) {
+  var seen = {};
+  var unique = [];
+  for (var i = 0; i < nodes.length; i++) {
+    var node = nodes[i];
+    if (!node || seen[node.id]) continue;
+    seen[node.id] = true;
+    unique.push(node);
+  }
+  return unique;
+}
+
+function postAsset(jobId, data) {
+  postToUi('post-asset', { jobId: jobId, data: data });
+}
+
+function addExportRecord(collection, asset, relativePath) {
+  collection.push({
+    nodeId: asset.nodeId,
+    nodeName: asset.nodeName,
+    format: asset.format,
+    fileName: asset.fileName,
+    relativePath: relativePath || null,
+  });
+}
+
+function addNodeArtifactRecord(collection, record) {
+  collection.push({
+    nodeId: record.nodeId,
+    nodeName: record.nodeName,
+    relativeDir: record.relativeDir,
+    screenshot: record.screenshot || null,
+    exports: record.exports || [],
+    images: record.images || [],
+    vectors: record.vectors || [],
+  });
+}
+
+async function exportImageFills(jobId, rootNodeId, extraction, assetContext) {
   var imageHashes = extraction.resources.images || [];
   if (imageHashes.length === 0) return;
 
   postToUi('status', { text: '正在导出图片填充 (' + imageHashes.length + ')...', state: 'working' });
   if (!extraction.assets.images) extraction.assets.images = [];
+  var imageDir = assetContext.imageDir || assetContext.assetDir || null;
 
   for (var i = 0; i < imageHashes.length; i++) {
     var hash = imageHashes[i];
@@ -830,31 +1039,34 @@ async function exportImageFills(jobId, rootNodeId, extraction) {
       var imageData = figma.getImageByHash(hash);
       if (!imageData) continue;
       var bytes = await imageData.getBytesAsync();
-      var base64Data = figma.base64Encode(bytes);
       var fileName = hash + '.png';
-      postToUi('post-asset', {
-        jobId: jobId,
-        data: {
-          rootNodeId: rootNodeId,
-          nodeId: 'image-fill',
-          nodeName: hash,
-          format: 'PNG',
-          base64: base64Data,
-          fileName: fileName,
-        },
-      });
-      extraction.assets.images.push({ hash: hash, fileName: fileName });
+      var relativePath = imageDir ? imageDir + '/' + fileName : null;
+      var payload = {
+        rootNodeId: rootNodeId,
+        nodeId: 'image-fill',
+        nodeName: hash,
+        format: 'PNG',
+        base64: figma.base64Encode(bytes),
+        fileName: fileName,
+      };
+      if (relativePath) payload.relativePath = relativePath;
+      if (assetContext.bundleId) payload.bundleId = assetContext.bundleId;
+      if (assetContext.pageId) payload.pageId = assetContext.pageId;
+      if (assetContext.pageName) payload.pageName = assetContext.pageName;
+      postAsset(jobId, payload);
+      extraction.assets.images.push({ hash: hash, fileName: fileName, relativePath: relativePath || null });
     } catch (_) { /* image export may fail for some hashes */ }
   }
 }
 
 var MAX_VECTOR_EXPORTS = 50;
 
-async function exportVectorNodes(jobId, rootNodeId, node, extraction) {
+async function exportVectorNodes(jobId, rootNodeId, node, extraction, assetContext) {
   var vectors = [];
   var vectorTypes = { VECTOR: 1, BOOLEAN_OPERATION: 1, STAR: 1, LINE: 1, ELLIPSE: 1, POLYGON: 1 };
 
   function collectVectors(n, isRoot) {
+    if (!n) return;
     if (!isRoot && vectorTypes[n.type]) {
       vectors.push(n);
     }
@@ -869,82 +1081,351 @@ async function exportVectorNodes(jobId, rootNodeId, node, extraction) {
   collectVectors(node, true);
   if (vectors.length === 0) return;
 
-  postToUi('status', { text: '正在导出矢量图标 (' + vectors.length + (vectors.length >= MAX_VECTOR_EXPORTS ? '+' : '') + ')...', state: 'working' });
+  postToUi('status', { text: '正在导出矢量资源 (' + vectors.length + (vectors.length >= MAX_VECTOR_EXPORTS ? '+' : '') + ')...', state: 'working' });
   if (!extraction.assets.vectors) extraction.assets.vectors = [];
+  var vectorDir = assetContext.vectorDir || assetContext.assetDir || null;
 
   for (var i = 0; i < vectors.length; i++) {
     var vec = vectors[i];
     try {
-      var bytes = await vec.exportAsync({ format: 'SVG' });
-      var base64Data = figma.base64Encode(bytes);
-      var fileName = sanitizeFileName(vec.name || vec.id) + '.svg';
-      postToUi('post-asset', {
-        jobId: jobId,
-        data: {
-          rootNodeId: rootNodeId,
+      var vectorAssets = await exportNodeAssets(vec, ['SVG', 'PNG'], rootNodeId);
+      var vectorBaseName = sanitizeFileName(vec.name || 'vector') + '--' + sanitizeIdForPath(vec.id);
+      for (var j = 0; j < vectorAssets.length; j++) {
+        vectorAssets[j].fileName = vectorBaseName + (vectorAssets[j].format === 'SVG' ? '.svg' : '@2x.png');
+        var relativePath = vectorDir ? vectorDir + '/' + vectorAssets[j].fileName : null;
+        if (relativePath) vectorAssets[j].relativePath = relativePath;
+        if (assetContext.bundleId) vectorAssets[j].bundleId = assetContext.bundleId;
+        if (assetContext.pageId) vectorAssets[j].pageId = assetContext.pageId;
+        if (assetContext.pageName) vectorAssets[j].pageName = assetContext.pageName;
+        postAsset(jobId, vectorAssets[j]);
+        extraction.assets.vectors.push({
           nodeId: vec.id,
-          nodeName: vec.name,
-          format: 'SVG',
-          base64: base64Data,
-          fileName: fileName,
-        },
-      });
-      extraction.assets.vectors.push({ nodeId: vec.id, name: vec.name, fileName: fileName });
+          name: vec.name,
+          format: vectorAssets[j].format,
+          fileName: vectorAssets[j].fileName,
+          relativePath: relativePath || null
+        });
+      }
     } catch (_) { /* vector export may fail */ }
   }
 }
 
-async function exportAssetsAndPost(jobId, node, extraction, options) {
-  var rootNodeId = node.id;
+async function exportNodeAssetFiles(jobId, nodes, rootNodeId, extraction, options, assetContext) {
+  var exportNodes = makeUniqueNodes(nodes || []);
+  if (exportNodes.length === 0) return;
 
   var exportFormats = options.exportFormats || (options.exportAssets ? ['SVG', 'PNG'] : []);
+  var exportDir = assetContext.exportDir || assetContext.assetDir || null;
   if (exportFormats.length > 0) {
     postToUi('status', { text: '正在导出资产...', state: 'working' });
-    var assets = await exportNodeAssets(node, exportFormats, rootNodeId);
-    for (var i = 0; i < assets.length; i++) {
-      postToUi('post-asset', { jobId: jobId, data: assets[i] });
-      extraction.assets.exports.push({ nodeId: assets[i].nodeId, format: assets[i].format, fileName: assets[i].fileName });
+    for (var i = 0; i < exportNodes.length; i++) {
+      var assets = await exportNodeAssets(exportNodes[i], exportFormats, rootNodeId);
+      for (var j = 0; j < assets.length; j++) {
+        var relativePath = exportDir ? exportDir + '/' + assets[j].fileName : null;
+        if (relativePath) assets[j].relativePath = relativePath;
+        if (assetContext.bundleId) assets[j].bundleId = assetContext.bundleId;
+        if (assetContext.pageId) assets[j].pageId = assetContext.pageId;
+        if (assetContext.pageName) assets[j].pageName = assetContext.pageName;
+        postAsset(jobId, assets[j]);
+        addExportRecord(extraction.assets.exports, assets[j], relativePath);
+      }
     }
   }
 
   if (options.exportAssets) {
-    await exportImageFills(jobId, rootNodeId, extraction);
-    await exportVectorNodes(jobId, rootNodeId, node, extraction);
-  }
-
-  if (options.screenshot !== false) {
-    postToUi('status', { text: '正在导出截图...', state: 'working' });
-    var screenshot = await exportFrameScreenshot(node);
-    if (screenshot) {
-      screenshot.rootNodeId = rootNodeId;
-      postToUi('post-asset', { jobId: jobId, data: screenshot });
-      extraction.assets.screenshot = { nodeId: screenshot.nodeId, fileName: screenshot.fileName };
+    await exportImageFills(jobId, rootNodeId, extraction, assetContext);
+    for (var k = 0; k < exportNodes.length; k++) {
+      await exportVectorNodes(jobId, rootNodeId, exportNodes[k], extraction, assetContext);
     }
   }
 }
 
-// ══════════════════════════════════════════════
-// Job execution (bridge-commanded)
-// ══════════════════════════════════════════════
+async function exportDirectNodeScreenshot(jobId, node, rootNodeId, assetContext, relativePath) {
+  try {
+    var bytes = await node.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: 2 } });
+    var payload = {
+      rootNodeId: rootNodeId,
+      nodeId: node.id,
+      nodeName: node.name,
+      format: 'PNG',
+      base64: figma.base64Encode(bytes),
+      fileName: baseName(relativePath || 'screenshot.png'),
+      isScreenshot: true,
+      screenshotKind: 'node',
+    };
+    if (relativePath) payload.relativePath = relativePath;
+    if (assetContext.bundleId) payload.bundleId = assetContext.bundleId;
+    if (assetContext.pageId) payload.pageId = assetContext.pageId;
+    if (assetContext.pageName) payload.pageName = assetContext.pageName;
+    postAsset(jobId, payload);
+    return {
+      nodeId: node.id,
+      nodeName: node.name,
+      fileName: payload.fileName,
+      relativePath: payload.relativePath || null,
+    };
+  } catch (_) { return null; }
+}
+
+async function exportPageScreenshot(jobId, page, rootNodeId, pageId, pageName, relativePath, bundleId) {
+  try {
+    var bytes = await page.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: 2 } });
+    var payload = {
+      rootNodeId: rootNodeId,
+      nodeId: page.id,
+      nodeName: page.name,
+      pageId: pageId,
+      pageName: pageName,
+      format: 'PNG',
+      base64: figma.base64Encode(bytes),
+      fileName: baseName(relativePath),
+      relativePath: relativePath,
+      isScreenshot: true,
+      screenshotKind: 'page',
+    };
+    if (bundleId) payload.bundleId = bundleId;
+    postAsset(jobId, payload);
+  } catch (_) { /* page screenshot export may fail */ }
+}
+
+function shouldExportNodePackages(nodes, options) {
+  if (!nodes || nodes.length === 0) return false;
+  if (!(options.exportAssets || options.nodeScreenshots || options.screenshot !== false)) return false;
+  return nodes.length > 1 || !!options.nodeScreenshots;
+}
+
+async function exportNodePackages(jobId, nodes, rootNodeId, extraction, options, assetContext) {
+  var packageNodes = makeUniqueNodes(nodes || []);
+  if (packageNodes.length === 0) return [];
+  if (!extraction.assets.nodeArtifacts) extraction.assets.nodeArtifacts = [];
+
+  postToUi('status', { text: '正在导出节点资源包 (' + packageNodes.length + ')...', state: 'working' });
+
+  for (var i = 0; i < packageNodes.length; i++) {
+    var node = packageNodes[i];
+    var relativeDir = buildNodeScopedRelativeDir(assetContext.baseDir, node.id);
+    var nodeExtraction = await extractNode(node, null);
+    var nodeRecord = {
+      nodeId: node.id,
+      nodeName: node.name,
+      relativeDir: relativeDir,
+      screenshot: null,
+      exports: [],
+      images: [],
+      vectors: [],
+    };
+
+    if (options.nodeScreenshots || options.screenshot !== false) {
+      nodeRecord.screenshot = await exportDirectNodeScreenshot(jobId, node, rootNodeId, assetContext, relativeDir + '/screenshot.png');
+    }
+
+    await exportNodeAssetFiles(jobId, [node], rootNodeId, nodeExtraction, options, {
+      bundleId: assetContext.bundleId || null,
+      pageId: assetContext.pageId || null,
+      pageName: assetContext.pageName || null,
+      exportDir: relativeDir + '/exports',
+      imageDir: relativeDir + '/assets/images',
+      vectorDir: relativeDir + '/assets/vectors',
+    });
+
+    nodeRecord.exports = nodeExtraction.assets.exports || [];
+    nodeRecord.images = nodeExtraction.assets.images || [];
+    nodeRecord.vectors = nodeExtraction.assets.vectors || [];
+    addNodeArtifactRecord(extraction.assets.nodeArtifacts, nodeRecord);
+  }
+
+  return extraction.assets.nodeArtifacts;
+}
+
+async function exportLegacyArtifacts(jobId, sourceNodes, page, extraction, options) {
+  var rootNodes = makeUniqueNodes(sourceNodes && sourceNodes.length ? sourceNodes : [page]);
+  var rootNodeId = extraction.meta.nodeId;
+  var shouldUseNodePackages = shouldExportNodePackages(rootNodes, options);
+
+  if (!shouldUseNodePackages || rootNodes.length === 1) {
+    await exportNodeAssetFiles(jobId, rootNodes, rootNodeId, extraction, options, {
+      assetDir: 'assets',
+      pageId: extraction.pageInfo ? extraction.pageInfo.pageId : null,
+      pageName: extraction.pageInfo ? extraction.pageInfo.pageName : null,
+    });
+  }
+
+  if (options.screenshot !== false && rootNodes.length > 0 && (!shouldUseNodePackages || rootNodes.length === 1)) {
+    postToUi('status', { text: '正在导出截图...', state: 'working' });
+    var screenshot = await exportFrameScreenshot(rootNodes[0]);
+    if (screenshot) {
+      screenshot.rootNodeId = rootNodeId;
+      postAsset(jobId, screenshot);
+      extraction.assets.screenshot = { nodeId: screenshot.nodeId, fileName: screenshot.fileName };
+    }
+  }
+
+  if (shouldUseNodePackages) {
+    await exportNodePackages(jobId, rootNodes, rootNodeId, extraction, options, {
+      baseDir: null,
+      pageId: extraction.pageInfo ? extraction.pageInfo.pageId : null,
+      pageName: extraction.pageInfo ? extraction.pageInfo.pageName : null,
+    });
+  }
+
+  if (page && extraction.screenshots && extraction.screenshots.length > 0) {
+    for (var i = 0; i < extraction.screenshots.length; i++) {
+      if (extraction.screenshots[i].kind === 'page') {
+        await exportPageScreenshot(
+          jobId,
+          page,
+          rootNodeId,
+          extraction.pageInfo.pageId,
+          extraction.pageInfo.pageName,
+          extraction.screenshots[i].filePath,
+          null
+        );
+        break;
+      }
+    }
+  }
+}
+
+async function buildBundlePageEntry(page, sourceMode, selectedNodes, options) {
+  var extraction;
+  if (sourceMode === 'page') {
+    extraction = await extractNode(page, null);
+  } else {
+    extraction = selectedNodes.length === 1 ? await extractNode(selectedNodes[0], null) : await extractMultipleNodes(selectedNodes);
+  }
+
+  try {
+    if (figma.root && figma.root.name) extraction.meta.fileName = figma.root.name;
+  } catch (_) { /* ignore */ }
+
+  var pageBounds = computePageContentBounds(page);
+  var pageInfo = buildPageInfo(page, extraction, sourceMode, selectedNodes, pageBounds);
+  var screenshotBaseDir = 'pages/' + sanitizeIdForPath(page.id);
+  var screenshots = buildScreenshotEntries(page, pageInfo, selectedNodes, options, screenshotBaseDir);
+  var regions = buildRegionsForExtraction(extraction, pageInfo);
+
+  return {
+    pageId: page.id,
+    pageName: page.name,
+    pageInfo: pageInfo,
+    extraction: extraction,
+    screenshots: screenshots,
+    regions: regions,
+  };
+}
+
+async function exportBundlePageArtifacts(jobId, bundleId, page, pageEntry, sourceNodes, selectedNodes, options) {
+  var rootNodes = makeUniqueNodes(sourceNodes && sourceNodes.length ? sourceNodes : [page]);
+  var directNodes = makeUniqueNodes(selectedNodes && selectedNodes.length ? selectedNodes : []);
+  var shouldUseNodePackages = shouldExportNodePackages(directNodes, options);
+
+  if (!shouldUseNodePackages || (rootNodes.length === 1 && rootNodes[0] === page)) {
+    await exportNodeAssetFiles(jobId, rootNodes, pageEntry.extraction.meta.nodeId, pageEntry.extraction, options, {
+      bundleId: bundleId,
+      pageId: pageEntry.pageId,
+      pageName: pageEntry.pageName,
+      assetDir: 'pages/' + sanitizeIdForPath(pageEntry.pageId) + '/assets',
+    });
+  }
+
+  if (shouldUseNodePackages) {
+    await exportNodePackages(jobId, directNodes, pageEntry.extraction.meta.nodeId, pageEntry.extraction, options, {
+      baseDir: 'pages/' + sanitizeIdForPath(pageEntry.pageId),
+      bundleId: bundleId,
+      pageId: pageEntry.pageId,
+      pageName: pageEntry.pageName,
+    });
+  }
+
+  for (var i = 0; i < pageEntry.screenshots.length; i++) {
+    if (pageEntry.screenshots[i].kind === 'page') {
+      await exportPageScreenshot(
+        jobId,
+        page,
+        pageEntry.extraction.meta.nodeId,
+        pageEntry.pageId,
+        pageEntry.pageName,
+        pageEntry.screenshots[i].filePath,
+        bundleId
+      );
+      break;
+    }
+  }
+}
+
+function listAllPages() {
+  var pages = [];
+  if (!figma.root || !figma.root.children) return pages;
+  for (var i = 0; i < figma.root.children.length; i++) {
+    if (figma.root.children[i] && figma.root.children[i].type === 'PAGE') pages.push(figma.root.children[i]);
+  }
+  return pages;
+}
+
+function findPagesByIdentifiers(identifiers) {
+  var pages = listAllPages();
+  var wanted = {};
+  for (var i = 0; i < identifiers.length; i++) wanted[String(identifiers[i]).toLowerCase()] = true;
+  var matched = [];
+  for (var j = 0; j < pages.length; j++) {
+    var page = pages[j];
+    if (wanted[String(page.id).toLowerCase()] || wanted[String(page.name).toLowerCase()]) {
+      matched.push(page);
+    }
+  }
+  return matched;
+}
+
+function getPagesWithSelection() {
+  var pages = listAllPages();
+  var selectedPages = [];
+  for (var i = 0; i < pages.length; i++) {
+    if (pages[i].selection && pages[i].selection.length > 0) selectedPages.push(pages[i]);
+  }
+  return selectedPages;
+}
+
+async function withOptimizedTraversal(fn) {
+  var canToggle = typeof figma.skipInvisibleInstanceChildren === 'boolean';
+  var previous = canToggle ? figma.skipInvisibleInstanceChildren : null;
+  try {
+    if (canToggle) figma.skipInvisibleInstanceChildren = true;
+    return await fn();
+  } finally {
+    if (canToggle) figma.skipInvisibleInstanceChildren = previous;
+  }
+}
+
+function handleError(jobId, error) {
+  postToUi('post-result', { jobId: jobId, data: { error: error.message || String(error) } });
+  postToUi('status', { text: '执行失败: ' + (error.message || String(error)), state: 'error' });
+}
 
 async function executeExtractJob(jobId, target, options) {
   try {
-    var nodeId = target.nodeId;
-    if (!nodeId) {
-      throw new Error('missing nodeId in extract target');
-    }
+    await withOptimizedTraversal(async function () {
+      var nodeId = target.nodeId;
+      if (!nodeId) {
+        throw new Error('missing nodeId in extract target');
+      }
 
-    var figmaNodeId = nodeId.replace(/-/g, ':');
-    var node = await figma.getNodeByIdAsync(figmaNodeId);
-    if (!node) {
-      throw new Error('node not found: ' + figmaNodeId);
-    }
+      var figmaNodeId = nodeId.replace(/-/g, ':');
+      var node = await figma.getNodeByIdAsync(figmaNodeId);
+      if (!node) {
+        throw new Error('node not found: ' + figmaNodeId);
+      }
 
-    var extraction = await extractNode(node, target.fileKey);
-    await exportAssetsAndPost(jobId, node, extraction, options);
+      var page = findPage(node);
+      var extraction = await extractNode(node, target.fileKey);
+      try {
+        if (figma.root && figma.root.name) extraction.meta.fileName = figma.root.name;
+      } catch (_) { /* ignore */ }
+      extraction = attachLegacyMetadata(extraction, page, [node], options, 'node');
+      await exportLegacyArtifacts(jobId, [node], page, extraction, options);
 
-    postToUi('post-result', { jobId: jobId, data: extraction });
-    postToUi('status', { text: '提取完成 ✓ (' + countKeys(extraction.resources.nodeTypes) + ' 种节点)', state: 'ok' });
+      postToUi('post-result', { jobId: jobId, data: extraction });
+      postToUi('status', { text: '提取完成 ✓ (' + countKeys(extraction.resources.nodeTypes) + ' 种节点)', state: 'ok' });
+    });
   } catch (error) {
     handleError(jobId, error);
   }
@@ -952,37 +1433,110 @@ async function executeExtractJob(jobId, target, options) {
 
 async function executeExtractSelectionJob(jobId, options) {
   try {
-    var selection = figma.currentPage.selection;
-    if (!selection || selection.length === 0) {
-      throw new Error('Figma 中没有选中任何元素，请先选中目标节点');
-    }
+    await withOptimizedTraversal(async function () {
+      var selection = figma.currentPage.selection;
+      if (!selection || selection.length === 0) {
+        throw new Error('Figma 中没有选中任何元素，请先选中目标节点');
+      }
 
-    var extraction;
-    var primaryNode = selection[0];
+      var extraction;
+      var sourceMode = selection.length > 1 ? 'selection-multi' : 'selection';
+      if (selection.length === 1) {
+        extraction = await extractNode(selection[0], null);
+      } else {
+        extraction = await extractMultipleNodes(selection);
+      }
 
-    if (selection.length === 1) {
-      extraction = await extractNode(primaryNode, null);
-    } else {
-      extraction = await extractMultipleNodes(selection);
-    }
+      try {
+        if (figma.root && figma.root.name) extraction.meta.fileName = figma.root.name;
+      } catch (_) { /* ignore */ }
+      extraction = attachLegacyMetadata(extraction, figma.currentPage, selection.slice(), options, sourceMode);
+      await exportLegacyArtifacts(jobId, selection.slice(), figma.currentPage, extraction, options);
 
-    try {
-      var root = figma.root;
-      if (root && root.name) extraction.meta.fileName = root.name;
-    } catch (_) { /* skip */ }
-
-    await exportAssetsAndPost(jobId, primaryNode, extraction, options);
-
-    postToUi('post-result', { jobId: jobId, data: extraction });
-    postToUi('status', { text: '选区提取完成 ✓ (' + selection.length + ' 个节点)', state: 'ok' });
+      postToUi('post-result', { jobId: jobId, data: extraction });
+      postToUi('status', { text: '选区提取完成 ✓ (' + selection.length + ' 个节点)', state: 'ok' });
+    });
   } catch (error) {
     handleError(jobId, error);
   }
 }
 
-// ══════════════════════════════════════════════
-// Message handler
-// ══════════════════════════════════════════════
+async function executeExtractPagesJob(jobId, target, options) {
+  try {
+    await withOptimizedTraversal(async function () {
+      var identifiers = target && target.pages ? target.pages : [];
+      var pages = findPagesByIdentifiers(identifiers);
+      if (pages.length === 0) {
+        throw new Error('未找到任何匹配页面，请检查 page 名称或 pageId');
+      }
+
+      var bundleId = createBundleId('pages-bundle');
+      var entries = [];
+      postToUi('status', { text: '正在提取 ' + pages.length + ' 个页面...', state: 'working' });
+      for (var i = 0; i < pages.length; i++) {
+        var page = pages[i];
+        var pageSelection = page.selection ? page.selection.slice() : [];
+        var entry = await buildBundlePageEntry(page, 'page', pageSelection, options);
+        entries.push(entry);
+        await exportBundlePageArtifacts(jobId, bundleId, page, entry, [page], pageSelection, options);
+      }
+
+      var bundle = {
+        schemaVersion: 1,
+        kind: 'figma-bundle',
+        bundleId: bundleId,
+        bundleName: 'Pages bundle (' + pages.length + ' pages)',
+        createdAt: new Date().toISOString(),
+        source: 'extract-pages',
+        fileName: figma.root && figma.root.name ? figma.root.name : null,
+        pages: entries,
+      };
+
+      postToUi('post-result', { jobId: jobId, data: bundle });
+      postToUi('status', { text: '页面 bundle 提取完成 ✓ (' + pages.length + ' 页)', state: 'ok' });
+    });
+  } catch (error) {
+    handleError(jobId, error);
+  }
+}
+
+async function executeExtractSelectedPagesBundleJob(jobId, options) {
+  try {
+    await withOptimizedTraversal(async function () {
+      var pages = getPagesWithSelection();
+      if (pages.length === 0) {
+        throw new Error('没有页面保留 selection，请先在一个或多个页面中选中目标节点');
+      }
+
+      var bundleId = createBundleId('selected-pages-bundle');
+      var entries = [];
+      postToUi('status', { text: '正在提取 ' + pages.length + ' 个带 selection 的页面...', state: 'working' });
+      for (var i = 0; i < pages.length; i++) {
+        var page = pages[i];
+        var pageSelection = page.selection.slice();
+        var entry = await buildBundlePageEntry(page, 'page-selection', pageSelection, options);
+        entries.push(entry);
+        await exportBundlePageArtifacts(jobId, bundleId, page, entry, pageSelection, pageSelection, options);
+      }
+
+      var bundle = {
+        schemaVersion: 1,
+        kind: 'figma-bundle',
+        bundleId: bundleId,
+        bundleName: 'Selected pages bundle (' + pages.length + ' pages)',
+        createdAt: new Date().toISOString(),
+        source: 'extract-selected-pages-bundle',
+        fileName: figma.root && figma.root.name ? figma.root.name : null,
+        pages: entries,
+      };
+
+      postToUi('post-result', { jobId: jobId, data: bundle });
+      postToUi('status', { text: '多页面 selection bundle 提取完成 ✓ (' + pages.length + ' 页)', state: 'ok' });
+    });
+  } catch (error) {
+    handleError(jobId, error);
+  }
+}
 
 figma.ui.onmessage = function (msg) {
   if (!msg || !msg.type) return;
@@ -1001,5 +1555,19 @@ figma.ui.onmessage = function (msg) {
       return;
     }
     executeExtractSelectionJob(selPayload.jobId, selPayload.options || {}).catch(function (err) { handleError(selPayload.jobId, err); });
+  } else if (msg.type === 'extract-pages') {
+    var pagesPayload = msg.payload || msg;
+    if (!pagesPayload.jobId || !pagesPayload.target || !pagesPayload.target.pages) {
+      postToUi('status', { text: '无效的 extract-pages 指令：缺少 jobId 或 pages', state: 'error' });
+      return;
+    }
+    executeExtractPagesJob(pagesPayload.jobId, pagesPayload.target, pagesPayload.options || {}).catch(function (err) { handleError(pagesPayload.jobId, err); });
+  } else if (msg.type === 'extract-selected-pages-bundle') {
+    var bundlePayload = msg.payload || msg;
+    if (!bundlePayload.jobId) {
+      postToUi('status', { text: '无效的 extract-selected-pages-bundle 指令：缺少 jobId', state: 'error' });
+      return;
+    }
+    executeExtractSelectedPagesBundleJob(bundlePayload.jobId, bundlePayload.options || {}).catch(function (err) { handleError(bundlePayload.jobId, err); });
   }
 };
