@@ -545,6 +545,9 @@ function resolveCacheContext(cacheDir) {
       pagesIndex: readJsonIfExists(path.join(cacheDir, 'indexes', 'pages.json')),
       screenshotsIndex: readJsonIfExists(path.join(cacheDir, 'indexes', 'screenshots.json')),
       regionsIndex: readJsonIfExists(path.join(cacheDir, 'indexes', 'regions.json')),
+      variablesIndex: readJsonIfExists(path.join(cacheDir, 'indexes', 'variables.json')),
+      componentsIndex: readJsonIfExists(path.join(cacheDir, 'indexes', 'components.json')),
+      cssIndex: readJsonIfExists(path.join(cacheDir, 'indexes', 'css.json')),
     };
   }
 
@@ -581,6 +584,27 @@ function getBundleRegions(context) {
     return context.regionsIndex.regions;
   }
   return [];
+}
+
+function getBundleVariablesIndex(context) {
+  if (context.variablesIndex && context.variablesIndex.variables) {
+    return context.variablesIndex.variables;
+  }
+  return null;
+}
+
+function getBundleComponentsIndex(context) {
+  if (context.componentsIndex && Array.isArray(context.componentsIndex.components)) {
+    return context.componentsIndex.components;
+  }
+  return null;
+}
+
+function getBundleCssIndex(context) {
+  if (context.cssIndex && Array.isArray(context.cssIndex.pages)) {
+    return context.cssIndex;
+  }
+  return null;
 }
 
 function getLegacyPageMeta(extraction) {
@@ -805,6 +829,10 @@ export async function handleQuery(args) {
     if (context.kind === 'legacy') {
       return { ok: true, cacheKind: 'legacy', variables: context.extraction.variables || {} };
     }
+    const indexedVariables = getBundleVariablesIndex(context);
+    if (indexedVariables) {
+      return { ok: true, cacheKind: 'bundle', variables: indexedVariables };
+    }
     const merged = { flat: { colors: {}, numbers: {}, strings: {}, booleans: {} } };
     for (const entry of getBundlePageExtractions(context)) {
       mergeFlatVariableMaps(merged.flat, entry.extraction.variables?.flat);
@@ -813,6 +841,10 @@ export async function handleQuery(args) {
   }
 
   if (opts.subcommand === 'components') {
+    const indexedComponents = context.kind === 'bundle' ? getBundleComponentsIndex(context) : null;
+    if (indexedComponents) {
+      return { ok: true, cacheKind: 'bundle', components: indexedComponents };
+    }
     const components = [];
     if (context.kind === 'legacy') {
       collectComponents(context.extraction.root, components, getLegacyPageMeta(context.extraction));
@@ -836,6 +868,17 @@ export async function handleQuery(args) {
         available: cssData.available !== false,
         reason: cssData.reason || null,
         css: cssData.available === false ? null : cssData,
+      };
+    }
+
+    const indexedCss = getBundleCssIndex(context);
+    if (indexedCss) {
+      return {
+        ok: true,
+        cacheKind: 'bundle',
+        available: indexedCss.available,
+        reason: indexedCss.reason || null,
+        pages: indexedCss.pages,
       };
     }
 

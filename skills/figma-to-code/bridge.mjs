@@ -9,9 +9,11 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = 3333;
-const CACHE_ROOT = path.join(__dirname, 'cache');
-const BASE_EXTRACT_TIMEOUT_MS = 60_000;
+const DEFAULT_CACHE_DIRNAME = '.figma-to-code';
+const JOB_START_TIMEOUT_MS = 45_000;
+const JOB_INACTIVITY_TIMEOUT_MS = 120_000;
 const CAPABILITIES_FILE = path.join(__dirname, 'plugin', 'capabilities.json');
+const DEFAULT_CACHE_ROOT = resolveCacheRoot(process.env.FIGMA_TO_CODE_CACHE_ROOT || null);
 
 const sseClients = new Set();
 const pendingJobs = new Map();
@@ -39,6 +41,13 @@ function parseFigmaInput(input) {
 
 function sanitizePathSegment(value) {
   return String(value || 'unknown').replace(/[^a-zA-Z0-9._-]+/g, '-');
+}
+
+export function resolveCacheRoot(input) {
+  if (typeof input === 'string' && input.trim()) {
+    return path.resolve(input.trim());
+  }
+  return path.resolve(process.cwd(), DEFAULT_CACHE_DIRNAME);
 }
 
 export function resolveSafeRelativePath(baseDir, relativePath) {
@@ -113,29 +122,45 @@ function hasPluginConnection() {
   return sseClients.size > 0;
 }
 
-function resolveJobTimeoutMs(type, options) {
-  let workUnits = 1;
-
-  if (options && (options.screenshot || options.pageScreenshots || options.selectionUnionScreenshot || options.nodeScreenshots)) {
-    workUnits += 2;
-  }
-  if (type === 'extract-pages' || type === 'extract-selected-pages-bundle') {
-    workUnits += 1;
-  }
-
-  return BASE_EXTRACT_TIMEOUT_MS * workUnits;
+function formatJobTimeoutMessage(timeoutMs, reason) {
+  return `${reason} after ${timeoutMs}ms`;
 }
 
-function createJob(type, target, options) {
+function armJobTimer(job, timeoutMs, reason) {
+  clearTimeout(job.timer);
+  job.timeoutMs = timeoutMs;
+  job.timeoutReason = reason;
+  job.timer = setTimeout(() => {
+    if (!pendingJobs.has(job.jobId)) {
+      return;
+    }
+    pendingJobs.delete(job.jobId);
+    job.reject(new Error(formatJobTimeoutMessage(timeoutMs, reason)));
+  }, timeoutMs);
+}
+
+function touchJob(job, activitySource) {
+  const timeoutMs = activitySource === 'created' ? JOB_START_TIMEOUT_MS : JOB_INACTIVITY_TIMEOUT_MS;
+  const reason = activitySource === 'created'
+    ? 'plugin did not start processing the extraction job'
+    : 'plugin stopped reporting progress';
+  job.lastActivityAt = new Date().toISOString();
+  job.lastActivitySource = activitySource;
+  armJobTimer(job, timeoutMs, reason);
+}
+
+function createJob(type, target, options, context) {
   const jobId = randomUUID();
-  const timeoutMs = resolveJobTimeoutMs(type, options || {});
   const job = {
     jobId,
     type,
     target,
     options: options || {},
+    context: context || {},
+    cacheRoot: resolveCacheRoot(context && context.cacheRoot),
     createdAt: new Date().toISOString(),
-    timeoutMs,
+    timeoutMs: 0,
+    timeoutReason: null,
     resolve: null,
     reject: null,
     timer: null,
@@ -148,14 +173,8 @@ function createJob(type, target, options) {
     job.reject = reject;
   });
 
-  job.timer = setTimeout(() => {
-    if (pendingJobs.has(jobId)) {
-      pendingJobs.delete(jobId);
-      job.reject(new Error('extraction timeout after ' + timeoutMs + 'ms'));
-    }
-  }, timeoutMs);
-
   pendingJobs.set(jobId, job);
+  touchJob(job, 'created');
   return { job, promise };
 }
 
@@ -175,16 +194,20 @@ function resolveJob(jobId, result) {
   return true;
 }
 
-function resolveLegacyCacheDir(fileKey, nodeId) {
+function getJobCacheRoot(job) {
+  return resolveCacheRoot(job && job.cacheRoot);
+}
+
+function resolveLegacyCacheDir(cacheRoot, fileKey, nodeId) {
   return path.join(
-    CACHE_ROOT,
+    cacheRoot,
     sanitizePathSegment(fileKey),
     sanitizePathSegment(nodeId)
   );
 }
 
-function resolveBundleCacheDir(bundleId) {
-  return path.join(CACHE_ROOT, 'bundles', sanitizePathSegment(bundleId));
+function resolveBundleCacheDir(cacheRoot, bundleId) {
+  return path.join(cacheRoot, 'bundles', sanitizePathSegment(bundleId));
 }
 
 function writeJsonFile(filePath, data) {
@@ -221,7 +244,7 @@ function writeExtractionToCache(result, job) {
     return null;
   }
 
-  const cacheDir = resolveLegacyCacheDir(fileKey, nodeId);
+  const cacheDir = resolveLegacyCacheDir(getJobCacheRoot(job), fileKey, nodeId);
   prepareJobOutputDir(job, cacheDir);
   writeJsonFile(path.join(cacheDir, 'extraction.json'), result);
 
@@ -275,11 +298,77 @@ function summarizePageEntry(bundleCacheDir, pageEntry) {
   return pageInfo;
 }
 
+function mergeFlatVariableMaps(target, source) {
+  if (!source || typeof source !== 'object') return;
+  for (const key of Object.keys(source)) {
+    if (!target[key]) target[key] = {};
+    Object.assign(target[key], source[key]);
+  }
+}
+
+function collectComponentEntries(node, output, pageMeta) {
+  if (!node || node.visible === false) return;
+  if (node.component) {
+    output.push({
+      pageId: pageMeta?.pageId || null,
+      pageName: pageMeta?.pageName || null,
+      nodeId: node.id,
+      nodeName: node.name,
+      type: node.type,
+      ...node.component,
+    });
+  }
+  if (Array.isArray(node.children)) {
+    for (const child of node.children) {
+      collectComponentEntries(child, output, pageMeta);
+    }
+  }
+}
+
+function buildBundleVariablesIndex(pageEntries) {
+  const merged = { flat: { colors: {}, numbers: {}, strings: {}, booleans: {} } };
+  for (const pageEntry of pageEntries) {
+    mergeFlatVariableMaps(merged.flat, pageEntry.extraction?.variables?.flat);
+  }
+  return merged;
+}
+
+function buildBundleComponentsIndex(pageEntries) {
+  const components = [];
+  for (const pageEntry of pageEntries) {
+    collectComponentEntries(pageEntry.extraction?.root, components, {
+      pageId: pageEntry.pageId,
+      pageName: pageEntry.pageName,
+    });
+  }
+  return components;
+}
+
+function buildBundleCssIndex(pageEntries) {
+  const pages = pageEntries.map((pageEntry) => {
+    const cssData = pageEntry.extraction?.css || null;
+    return {
+      pageId: pageEntry.pageId,
+      pageName: pageEntry.pageName,
+      available: cssData?.available !== false && !!cssData,
+      reason: cssData?.reason || (cssData ? null : 'No css hints recorded for this page'),
+      css: cssData?.available === false ? null : cssData,
+    };
+  });
+
+  const available = pages.some((entry) => entry.available);
+  return {
+    available,
+    reason: available ? null : 'No css hints recorded in this bundle cache',
+    pages,
+  };
+}
+
 function writeBundleToCache(bundleResult, job) {
   const bundleId = bundleResult.bundleId;
   if (!bundleId) return null;
 
-  const cacheDir = resolveBundleCacheDir(bundleId);
+  const cacheDir = resolveBundleCacheDir(getJobCacheRoot(job), bundleId);
   prepareJobOutputDir(job, cacheDir);
 
   const pageEntries = Array.isArray(bundleResult.pages) ? bundleResult.pages : [];
@@ -316,6 +405,13 @@ function writeBundleToCache(bundleResult, job) {
   writeJsonFile(path.join(cacheDir, 'indexes', 'pages.json'), { pages: pageSummaries });
   writeJsonFile(path.join(cacheDir, 'indexes', 'screenshots.json'), { screenshots: screenshotEntries });
   writeJsonFile(path.join(cacheDir, 'indexes', 'regions.json'), { regions: regionEntries });
+  writeJsonFile(path.join(cacheDir, 'indexes', 'variables.json'), {
+    variables: buildBundleVariablesIndex(pageEntries),
+  });
+  writeJsonFile(path.join(cacheDir, 'indexes', 'components.json'), {
+    components: buildBundleComponentsIndex(pageEntries),
+  });
+  writeJsonFile(path.join(cacheDir, 'indexes', 'css.json'), buildBundleCssIndex(pageEntries));
 
   return cacheDir;
 }
@@ -334,8 +430,8 @@ export function writeBase64ToRelativePath(baseDir, relativePath, base64Data) {
   return filePath;
 }
 
-function writeAssetToLegacyCache(fileKey, nodeId, asset) {
-  const cacheDir = resolveLegacyCacheDir(fileKey, nodeId);
+function writeAssetToLegacyCache(cacheRoot, fileKey, nodeId, asset) {
+  const cacheDir = resolveLegacyCacheDir(cacheRoot, fileKey, nodeId);
   const assetsDir = path.join(cacheDir, 'assets');
   fs.mkdirSync(assetsDir, { recursive: true });
 
@@ -346,8 +442,8 @@ function writeAssetToLegacyCache(fileKey, nodeId, asset) {
   return filePath;
 }
 
-function writeScreenshotToLegacyCache(fileKey, nodeId, base64Data) {
-  const cacheDir = resolveLegacyCacheDir(fileKey, nodeId);
+function writeScreenshotToLegacyCache(cacheRoot, fileKey, nodeId, base64Data) {
+  const cacheDir = resolveLegacyCacheDir(cacheRoot, fileKey, nodeId);
   fs.mkdirSync(cacheDir, { recursive: true });
   const filePath = path.join(cacheDir, 'screenshot.png');
   fs.writeFileSync(filePath, Buffer.from(base64Data, 'base64'));
@@ -416,6 +512,8 @@ function handleHealth(_request, response) {
     ok: true,
     pluginConnected: hasPluginConnection(),
     uptime: Math.round((Date.now() - startedAt) / 1000),
+    activeJobs: pendingJobs.size,
+    defaultCacheRoot: DEFAULT_CACHE_ROOT,
   });
 }
 
@@ -428,7 +526,7 @@ function handleEvents(_request, response) {
   addSseClient(response);
 }
 
-async function dispatchJob(response, type, target, options) {
+async function dispatchJob(response, type, target, options, context) {
   if (!hasPluginConnection()) {
     sendJson(response, 503, {
       ok: false,
@@ -438,7 +536,7 @@ async function dispatchJob(response, type, target, options) {
     return;
   }
 
-  const { job, promise } = createJob(type, target, options || {});
+  const { job, promise } = createJob(type, target, options || {}, context || {});
   broadcastSse(type, {
     jobId: job.jobId,
     target: job.target,
@@ -466,12 +564,12 @@ async function handleExtract(request, response) {
     input: body.input,
     fileKey: parsed.fileKey,
     nodeId: parsed.nodeId,
-  }, body.options || {});
+  }, body.options || {}, body.context || {});
 }
 
 async function handleExtractSelection(request, response) {
   const body = (await readBody(request)) || {};
-  await dispatchJob(response, 'extract-selection', {}, body.options || {});
+  await dispatchJob(response, 'extract-selection', {}, body.options || {}, body.context || {});
 }
 
 async function handleExtractPages(request, response) {
@@ -480,12 +578,12 @@ async function handleExtractPages(request, response) {
     sendJson(response, 400, { ok: false, error: 'missing pages array' });
     return;
   }
-  await dispatchJob(response, 'extract-pages', { pages: body.pages }, body.options || {});
+  await dispatchJob(response, 'extract-pages', { pages: body.pages }, body.options || {}, body.context || {});
 }
 
 async function handleExtractSelectedPagesBundle(request, response) {
   const body = (await readBody(request)) || {};
-  await dispatchJob(response, 'extract-selected-pages-bundle', {}, body.options || {});
+  await dispatchJob(response, 'extract-selected-pages-bundle', {}, body.options || {}, body.context || {});
 }
 
 async function handleJobResult(request, response, jobId) {
@@ -504,6 +602,23 @@ async function handleJobResult(request, response, jobId) {
   sendJson(response, 200, { ok: true });
 }
 
+async function handleJobProgress(request, response, jobId) {
+  const body = (await readBody(request)) || {};
+  const job = pendingJobs.get(jobId);
+  if (!job) {
+    sendJson(response, 404, { ok: false, error: 'job not found' });
+    return;
+  }
+
+  job.progress = {
+    text: body.text || null,
+    state: body.state || null,
+    reportedAt: new Date().toISOString(),
+  };
+  touchJob(job, 'progress');
+  sendJson(response, 200, { ok: true });
+}
+
 async function handleJobAsset(request, response, jobId) {
   const body = await readBody(request);
   if (!body || !body.base64 || !body.format) {
@@ -517,18 +632,20 @@ async function handleJobAsset(request, response, jobId) {
     return;
   }
 
+  const cacheRoot = getJobCacheRoot(job);
+
   let baseDir = null;
   let filePath = null;
   let relativePath = body.relativePath || null;
 
   if (body.bundleId) {
-    baseDir = resolveBundleCacheDir(body.bundleId);
+    baseDir = resolveBundleCacheDir(cacheRoot, body.bundleId);
   }
 
   if (!baseDir && relativePath) {
     const fileKey = job.target?.fileKey || 'unknown-file';
     const rootNodeId = body.rootNodeId || job.target?.nodeId || body.nodeId || 'unknown-node';
-    baseDir = resolveLegacyCacheDir(fileKey, rootNodeId);
+    baseDir = resolveLegacyCacheDir(cacheRoot, fileKey, rootNodeId);
   }
 
   if (baseDir) {
@@ -548,15 +665,17 @@ async function handleJobAsset(request, response, jobId) {
   } else if (body.isScreenshot) {
     const fileKey = job.target?.fileKey || 'unknown-file';
     const rootNodeId = body.rootNodeId || job.target?.nodeId || body.nodeId || 'unknown-node';
-    prepareJobOutputDir(job, resolveLegacyCacheDir(fileKey, rootNodeId));
-    filePath = writeScreenshotToLegacyCache(fileKey, rootNodeId, body.base64);
+    prepareJobOutputDir(job, resolveLegacyCacheDir(cacheRoot, fileKey, rootNodeId));
+    filePath = writeScreenshotToLegacyCache(cacheRoot, fileKey, rootNodeId, body.base64);
     relativePath = 'screenshot.png';
   } else {
     const fileKey = job.target?.fileKey || 'unknown-file';
     const rootNodeId = body.rootNodeId || job.target?.nodeId || body.nodeId || 'unknown-node';
-    prepareJobOutputDir(job, resolveLegacyCacheDir(fileKey, rootNodeId));
-    filePath = writeAssetToLegacyCache(fileKey, rootNodeId, body);
+    prepareJobOutputDir(job, resolveLegacyCacheDir(cacheRoot, fileKey, rootNodeId));
+    filePath = writeAssetToLegacyCache(cacheRoot, fileKey, rootNodeId, body);
   }
+
+  touchJob(job, 'asset');
 
   job.assets.push({
     type: body.isScreenshot ? 'screenshot' : 'export',
@@ -612,6 +731,12 @@ const server = http.createServer(async (request, response) => {
     const jobResultMatch = pathname.match(/^\/jobs\/([^/]+)\/result$/);
     if (request.method === 'POST' && jobResultMatch) {
       await handleJobResult(request, response, jobResultMatch[1]);
+      return;
+    }
+
+    const jobProgressMatch = pathname.match(/^\/jobs\/([^/]+)\/progress$/);
+    if (request.method === 'POST' && jobProgressMatch) {
+      await handleJobProgress(request, response, jobProgressMatch[1]);
       return;
     }
 

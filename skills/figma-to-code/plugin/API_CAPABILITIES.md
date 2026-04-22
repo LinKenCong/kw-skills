@@ -42,6 +42,8 @@ Outputs:
 - `ok`
 - `pluginConnected`
 - `uptime`
+- `activeJobs`
+- `defaultCacheRoot`
 
 ### 2. `extract.node`
 Purpose:
@@ -107,11 +109,14 @@ Official APIs used:
 - `figma.skipInvisibleInstanceChildren`
 
 Outputs:
-- bundle cache under `cache/bundles/<bundleId>/`
+- bundle cache under `.figma-to-code/bundles/<bundleId>/`
 - `bundle.json`
 - `indexes/pages.json`
 - `indexes/screenshots.json`
 - `indexes/regions.json`
+- `indexes/variables.json`
+- `indexes/components.json`
+- `indexes/css.json`
 - `pages/<pageId>/page.json`
 - `pages/<pageId>/extraction.json`
 - `pages/<pageId>/regions.level1.json`
@@ -178,6 +183,9 @@ CLI:
 Purpose:
 - return extracted variable catalog / flat token maps
 
+Notes:
+- for bundle caches, prefer the prebuilt `indexes/variables.json` summary when available
+
 ### 11. `query.components`
 CLI:
 - `node figma-to-code/scripts/bridge_client.mjs query components --cache <cacheDir>`
@@ -185,6 +193,9 @@ CLI:
 Purpose:
 - return nodes that carry component semantics
 - includes `mainComponent`, current properties, and variant properties when available
+
+Notes:
+- for bundle caches, prefer the prebuilt `indexes/components.json` summary when available
 
 ### 12. `query.css`
 CLI:
@@ -200,6 +211,7 @@ Official API used:
 Notes:
 - this is not guaranteed in every mode/node type
 - callers must handle `available: false`
+- for bundle caches, prefer the prebuilt `indexes/css.json` summary when available
 
 ## Recommended usage patterns
 

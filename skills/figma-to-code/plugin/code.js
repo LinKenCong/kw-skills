@@ -1,4 +1,5 @@
 figma.showUI(__html__, { width: 340, height: 300 });
+var JOB_HEARTBEAT_INTERVAL_MS = 15000;
 
 // ══════════════════════════════════════════════
 // Utility
@@ -56,6 +57,14 @@ function postToUi(type, data) {
     }
   }
   figma.ui.postMessage(msg);
+}
+
+function postStatus(jobId, text, state) {
+  postToUi('status', {
+    jobId: jobId || null,
+    text: text,
+    state: state,
+  });
 }
 
 // ══════════════════════════════════════════════
@@ -531,6 +540,31 @@ function createResourceCollector() {
   return { nodeTypes: {}, fonts: {}, images: {}, effects: {}, components: {} };
 }
 
+function registerImageUsage(collector, hash, node) {
+  if (!collector.images[hash]) {
+    collector.images[hash] = {
+      hash: hash,
+      count: 0,
+      sources: [],
+    };
+  }
+
+  var entry = collector.images[hash];
+  entry.count += 1;
+  if (!node || !node.id) return;
+
+  for (var i = 0; i < entry.sources.length; i++) {
+    if (entry.sources[i].nodeId === node.id) return;
+  }
+
+  if (entry.sources.length < 5) {
+    entry.sources.push({
+      nodeId: node.id,
+      nodeName: node.name || null,
+    });
+  }
+}
+
 function registerResources(collector, node) {
   collector.nodeTypes[node.type] = (collector.nodeTypes[node.type] || 0) + 1;
 
@@ -546,10 +580,53 @@ function registerResources(collector, node) {
   if (Array.isArray(node.fills)) {
     for (var i = 0; i < node.fills.length; i++) {
       if (node.fills[i] && typeof node.fills[i].imageHash === 'string') {
-        collector.images[node.fills[i].imageHash] = (collector.images[node.fills[i].imageHash] || 0) + 1;
+        registerImageUsage(collector, node.fills[i].imageHash, node);
       }
     }
   }
+}
+
+function buildImageRefs(images) {
+  var refs = {};
+  for (var hash in images) {
+    var entry = images[hash];
+    var primary = entry && entry.sources && entry.sources.length > 0 ? entry.sources[0] : null;
+    refs[hash] = {
+      count: entry && typeof entry.count === 'number' ? entry.count : 0,
+      primaryNodeId: primary ? primary.nodeId : null,
+      primaryNodeName: primary ? primary.nodeName : null,
+      sources: entry && entry.sources ? entry.sources.slice() : [],
+    };
+  }
+  return refs;
+}
+
+function finalizeResourceCollector(collector) {
+  return {
+    nodeTypes: collector.nodeTypes,
+    fonts: Object.values(collector.fonts),
+    images: Object.keys(collector.images),
+    imageRefs: buildImageRefs(collector.images),
+  };
+}
+
+function collectResourcesFromNodes(nodes) {
+  var collector = createResourceCollector();
+  var roots = makeUniqueNodes(nodes || []);
+  var stack = roots.slice();
+
+  while (stack.length > 0) {
+    var current = stack.pop();
+    if (!current) continue;
+    registerResources(collector, current);
+    if (current.children && Array.isArray(current.children)) {
+      for (var i = current.children.length - 1; i >= 0; i--) {
+        stack.push(current.children[i]);
+      }
+    }
+  }
+
+  return finalizeResourceCollector(collector);
 }
 
 // ══════════════════════════════════════════════
@@ -692,16 +769,18 @@ function computeUnionBoundingBox(nodes) {
   };
 }
 
-async function extractNode(node, fileKey) {
-  postToUi('status', { text: '正在提取 ' + node.name + '...', state: 'working' });
+async function extractNode(node, fileKey, jobId) {
+  postStatus(jobId, '正在提取 ' + node.name + '...', 'working');
 
   var allNodes = collectSubtreeNodes(node);
   var variableCache = await resolveVariableCache(allNodes);
   var resourceCollector = createResourceCollector();
+  var resources;
 
   var root = await serializeNode(node, variableCache, resourceCollector, 0);
   var variables = await buildVariablesDefs(variableCache);
   var page = findPage(node);
+  resources = finalizeResourceCollector(resourceCollector);
 
   return {
     version: 2,
@@ -716,18 +795,14 @@ async function extractNode(node, fileKey) {
     },
     root: root,
     variables: variables,
-    resources: {
-      nodeTypes: resourceCollector.nodeTypes,
-      fonts: Object.values(resourceCollector.fonts),
-      images: Object.keys(resourceCollector.images),
-    },
+    resources: resources,
     assets: { exports: [], screenshot: null },
     css: await captureCssHints(node),
   };
 }
 
-async function extractMultipleNodes(nodes) {
-  postToUi('status', { text: '正在提取 ' + nodes.length + ' 个选中节点...', state: 'working' });
+async function extractMultipleNodes(nodes, jobId) {
+  postStatus(jobId, '正在提取 ' + nodes.length + ' 个选中节点...', 'working');
 
   var allSubtreeNodes = [];
   for (var i = 0; i < nodes.length; i++) {
@@ -737,6 +812,7 @@ async function extractMultipleNodes(nodes) {
 
   var variableCache = await resolveVariableCache(allSubtreeNodes);
   var resourceCollector = createResourceCollector();
+  var resources;
 
   var serializedChildren = [];
   for (var k = 0; k < nodes.length; k++) {
@@ -778,6 +854,7 @@ async function extractMultipleNodes(nodes) {
   var page = findPage(nodes[0]);
   var selectedNodeIds = [];
   for (var n = 0; n < nodes.length; n++) selectedNodeIds.push(nodes[n].id);
+  resources = finalizeResourceCollector(resourceCollector);
 
   return {
     version: 2,
@@ -795,11 +872,7 @@ async function extractMultipleNodes(nodes) {
     },
     root: virtualRoot,
     variables: variables,
-    resources: {
-      nodeTypes: resourceCollector.nodeTypes,
-      fonts: Object.values(resourceCollector.fonts),
-      images: Object.keys(resourceCollector.images),
-    },
+    resources: resources,
     assets: { exports: [], screenshot: null },
     css: {
       available: false,
@@ -1025,26 +1098,34 @@ function addNodeArtifactRecord(collection, record) {
   });
 }
 
-async function exportImageFills(jobId, rootNodeId, extraction, assetContext) {
-  var imageHashes = extraction.resources.images || [];
+function buildImageFillFileName(hash, imageRefs) {
+  var imageRef = imageRefs && imageRefs[hash] ? imageRefs[hash] : null;
+  var sourceName = imageRef && imageRef.primaryNodeName ? imageRef.primaryNodeName : 'image-fill';
+  var shortHash = sanitizeFileName(hash).slice(0, 16) || 'image';
+  return sanitizeFileName(sourceName) + '--' + shortHash + '.png';
+}
+
+async function exportImageFills(jobId, rootNodeId, assetRecords, imageRefs, assetContext) {
+  var imageHashes = imageRefs ? Object.keys(imageRefs) : [];
   if (imageHashes.length === 0) return;
 
-  postToUi('status', { text: '正在导出图片填充 (' + imageHashes.length + ')...', state: 'working' });
-  if (!extraction.assets.images) extraction.assets.images = [];
+  postStatus(jobId, '正在导出图片填充 (' + imageHashes.length + ')...', 'working');
+  if (!assetRecords.images) assetRecords.images = [];
   var imageDir = assetContext.imageDir || assetContext.assetDir || null;
 
   for (var i = 0; i < imageHashes.length; i++) {
     var hash = imageHashes[i];
+    var imageRef = imageRefs && imageRefs[hash] ? imageRefs[hash] : null;
     try {
       var imageData = figma.getImageByHash(hash);
       if (!imageData) continue;
       var bytes = await imageData.getBytesAsync();
-      var fileName = hash + '.png';
+      var fileName = buildImageFillFileName(hash, imageRefs);
       var relativePath = imageDir ? imageDir + '/' + fileName : null;
       var payload = {
         rootNodeId: rootNodeId,
-        nodeId: 'image-fill',
-        nodeName: hash,
+        nodeId: imageRef && imageRef.primaryNodeId ? imageRef.primaryNodeId : 'image-fill',
+        nodeName: imageRef && imageRef.primaryNodeName ? imageRef.primaryNodeName : hash,
         format: 'PNG',
         base64: figma.base64Encode(bytes),
         fileName: fileName,
@@ -1054,14 +1135,20 @@ async function exportImageFills(jobId, rootNodeId, extraction, assetContext) {
       if (assetContext.pageId) payload.pageId = assetContext.pageId;
       if (assetContext.pageName) payload.pageName = assetContext.pageName;
       postAsset(jobId, payload);
-      extraction.assets.images.push({ hash: hash, fileName: fileName, relativePath: relativePath || null });
+      assetRecords.images.push({
+        hash: hash,
+        fileName: fileName,
+        relativePath: relativePath || null,
+        sourceNodeId: imageRef && imageRef.primaryNodeId ? imageRef.primaryNodeId : null,
+        sourceNodeName: imageRef && imageRef.primaryNodeName ? imageRef.primaryNodeName : null,
+      });
     } catch (_) { /* image export may fail for some hashes */ }
   }
 }
 
 var MAX_VECTOR_EXPORTS = 50;
 
-async function exportVectorNodes(jobId, rootNodeId, node, extraction, assetContext) {
+async function exportVectorNodes(jobId, rootNodeId, node, assetRecords, assetContext) {
   var vectors = [];
   var vectorTypes = { VECTOR: 1, BOOLEAN_OPERATION: 1, STAR: 1, LINE: 1, ELLIPSE: 1, POLYGON: 1 };
 
@@ -1081,8 +1168,8 @@ async function exportVectorNodes(jobId, rootNodeId, node, extraction, assetConte
   collectVectors(node, true);
   if (vectors.length === 0) return;
 
-  postToUi('status', { text: '正在导出矢量资源 (' + vectors.length + (vectors.length >= MAX_VECTOR_EXPORTS ? '+' : '') + ')...', state: 'working' });
-  if (!extraction.assets.vectors) extraction.assets.vectors = [];
+  postStatus(jobId, '正在导出矢量资源 (' + vectors.length + (vectors.length >= MAX_VECTOR_EXPORTS ? '+' : '') + ')...', 'working');
+  if (!assetRecords.vectors) assetRecords.vectors = [];
   var vectorDir = assetContext.vectorDir || assetContext.assetDir || null;
 
   for (var i = 0; i < vectors.length; i++) {
@@ -1098,7 +1185,7 @@ async function exportVectorNodes(jobId, rootNodeId, node, extraction, assetConte
         if (assetContext.pageId) vectorAssets[j].pageId = assetContext.pageId;
         if (assetContext.pageName) vectorAssets[j].pageName = assetContext.pageName;
         postAsset(jobId, vectorAssets[j]);
-        extraction.assets.vectors.push({
+        assetRecords.vectors.push({
           nodeId: vec.id,
           name: vec.name,
           format: vectorAssets[j].format,
@@ -1110,14 +1197,15 @@ async function exportVectorNodes(jobId, rootNodeId, node, extraction, assetConte
   }
 }
 
-async function exportNodeAssetFiles(jobId, nodes, rootNodeId, extraction, options, assetContext) {
+async function exportNodeAssetFiles(jobId, nodes, rootNodeId, assetRecords, options, assetContext) {
   var exportNodes = makeUniqueNodes(nodes || []);
   if (exportNodes.length === 0) return;
+  if (!assetRecords.exports) assetRecords.exports = [];
 
   var exportFormats = options.exportFormats || (options.exportAssets ? ['SVG', 'PNG'] : []);
   var exportDir = assetContext.exportDir || assetContext.assetDir || null;
   if (exportFormats.length > 0) {
-    postToUi('status', { text: '正在导出资产...', state: 'working' });
+    postStatus(jobId, '正在导出资产...', 'working');
     for (var i = 0; i < exportNodes.length; i++) {
       var assets = await exportNodeAssets(exportNodes[i], exportFormats, rootNodeId);
       for (var j = 0; j < assets.length; j++) {
@@ -1127,15 +1215,15 @@ async function exportNodeAssetFiles(jobId, nodes, rootNodeId, extraction, option
         if (assetContext.pageId) assets[j].pageId = assetContext.pageId;
         if (assetContext.pageName) assets[j].pageName = assetContext.pageName;
         postAsset(jobId, assets[j]);
-        addExportRecord(extraction.assets.exports, assets[j], relativePath);
+        addExportRecord(assetRecords.exports, assets[j], relativePath);
       }
     }
   }
 
   if (options.exportAssets) {
-    await exportImageFills(jobId, rootNodeId, extraction, assetContext);
+    await exportImageFills(jobId, rootNodeId, assetRecords, assetContext.imageRefs || null, assetContext);
     for (var k = 0; k < exportNodes.length; k++) {
-      await exportVectorNodes(jobId, rootNodeId, exportNodes[k], extraction, assetContext);
+      await exportVectorNodes(jobId, rootNodeId, exportNodes[k], assetRecords, assetContext);
     }
   }
 }
@@ -1199,12 +1287,13 @@ async function exportNodePackages(jobId, nodes, rootNodeId, extraction, options,
   if (packageNodes.length === 0) return [];
   if (!extraction.assets.nodeArtifacts) extraction.assets.nodeArtifacts = [];
 
-  postToUi('status', { text: '正在导出节点资源包 (' + packageNodes.length + ')...', state: 'working' });
+  postStatus(jobId, '正在导出节点资源包 (' + packageNodes.length + ')...', 'working');
 
   for (var i = 0; i < packageNodes.length; i++) {
     var node = packageNodes[i];
     var relativeDir = buildNodeScopedRelativeDir(assetContext.baseDir, node.id);
-    var nodeExtraction = await extractNode(node, null);
+    var nodeResources = collectResourcesFromNodes([node]);
+    var nodeAssets = { exports: [], images: [], vectors: [] };
     var nodeRecord = {
       nodeId: node.id,
       nodeName: node.name,
@@ -1219,18 +1308,19 @@ async function exportNodePackages(jobId, nodes, rootNodeId, extraction, options,
       nodeRecord.screenshot = await exportDirectNodeScreenshot(jobId, node, rootNodeId, assetContext, relativeDir + '/screenshot.png');
     }
 
-    await exportNodeAssetFiles(jobId, [node], rootNodeId, nodeExtraction, options, {
+    await exportNodeAssetFiles(jobId, [node], rootNodeId, nodeAssets, options, {
       bundleId: assetContext.bundleId || null,
       pageId: assetContext.pageId || null,
       pageName: assetContext.pageName || null,
       exportDir: relativeDir + '/exports',
       imageDir: relativeDir + '/assets/images',
       vectorDir: relativeDir + '/assets/vectors',
+      imageRefs: nodeResources.imageRefs,
     });
 
-    nodeRecord.exports = nodeExtraction.assets.exports || [];
-    nodeRecord.images = nodeExtraction.assets.images || [];
-    nodeRecord.vectors = nodeExtraction.assets.vectors || [];
+    nodeRecord.exports = nodeAssets.exports || [];
+    nodeRecord.images = nodeAssets.images || [];
+    nodeRecord.vectors = nodeAssets.vectors || [];
     addNodeArtifactRecord(extraction.assets.nodeArtifacts, nodeRecord);
   }
 
@@ -1243,15 +1333,16 @@ async function exportLegacyArtifacts(jobId, sourceNodes, page, extraction, optio
   var shouldUseNodePackages = shouldExportNodePackages(rootNodes, options);
 
   if (!shouldUseNodePackages || rootNodes.length === 1) {
-    await exportNodeAssetFiles(jobId, rootNodes, rootNodeId, extraction, options, {
+    await exportNodeAssetFiles(jobId, rootNodes, rootNodeId, extraction.assets, options, {
       assetDir: 'assets',
       pageId: extraction.pageInfo ? extraction.pageInfo.pageId : null,
       pageName: extraction.pageInfo ? extraction.pageInfo.pageName : null,
+      imageRefs: extraction.resources ? extraction.resources.imageRefs : null,
     });
   }
 
   if (options.screenshot !== false && rootNodes.length > 0 && (!shouldUseNodePackages || rootNodes.length === 1)) {
-    postToUi('status', { text: '正在导出截图...', state: 'working' });
+    postStatus(jobId, '正在导出截图...', 'working');
     var screenshot = await exportFrameScreenshot(rootNodes[0]);
     if (screenshot) {
       screenshot.rootNodeId = rootNodeId;
@@ -1286,12 +1377,14 @@ async function exportLegacyArtifacts(jobId, sourceNodes, page, extraction, optio
   }
 }
 
-async function buildBundlePageEntry(page, sourceMode, selectedNodes, options) {
+async function buildBundlePageEntry(page, sourceMode, selectedNodes, options, jobId) {
   var extraction;
   if (sourceMode === 'page') {
-    extraction = await extractNode(page, null);
+    extraction = await extractNode(page, null, jobId);
   } else {
-    extraction = selectedNodes.length === 1 ? await extractNode(selectedNodes[0], null) : await extractMultipleNodes(selectedNodes);
+    extraction = selectedNodes.length === 1
+      ? await extractNode(selectedNodes[0], null, jobId)
+      : await extractMultipleNodes(selectedNodes, jobId);
   }
 
   try {
@@ -1320,11 +1413,12 @@ async function exportBundlePageArtifacts(jobId, bundleId, page, pageEntry, sourc
   var shouldUseNodePackages = shouldExportNodePackages(directNodes, options);
 
   if (!shouldUseNodePackages || (rootNodes.length === 1 && rootNodes[0] === page)) {
-    await exportNodeAssetFiles(jobId, rootNodes, pageEntry.extraction.meta.nodeId, pageEntry.extraction, options, {
+    await exportNodeAssetFiles(jobId, rootNodes, pageEntry.extraction.meta.nodeId, pageEntry.extraction.assets, options, {
       bundleId: bundleId,
       pageId: pageEntry.pageId,
       pageName: pageEntry.pageName,
       assetDir: 'pages/' + sanitizeIdForPath(pageEntry.pageId) + '/assets',
+      imageRefs: pageEntry.extraction.resources ? pageEntry.extraction.resources.imageRefs : null,
     });
   }
 
@@ -1385,6 +1479,12 @@ function getPagesWithSelection() {
   return selectedPages;
 }
 
+async function ensurePageLoaded(page) {
+  if (!page || typeof page.loadAsync !== 'function') return page;
+  await page.loadAsync();
+  return page;
+}
+
 async function withOptimizedTraversal(fn) {
   var canToggle = typeof figma.skipInvisibleInstanceChildren === 'boolean';
   var previous = canToggle ? figma.skipInvisibleInstanceChildren : null;
@@ -1396,35 +1496,49 @@ async function withOptimizedTraversal(fn) {
   }
 }
 
+async function withJobHeartbeat(jobId, heartbeatText, fn) {
+  var timer = setInterval(function () {
+    postStatus(jobId, heartbeatText, 'working');
+  }, JOB_HEARTBEAT_INTERVAL_MS);
+
+  try {
+    return await fn();
+  } finally {
+    clearInterval(timer);
+  }
+}
+
 function handleError(jobId, error) {
   postToUi('post-result', { jobId: jobId, data: { error: error.message || String(error) } });
-  postToUi('status', { text: '执行失败: ' + (error.message || String(error)), state: 'error' });
+  postStatus(jobId, '执行失败: ' + (error.message || String(error)), 'error');
 }
 
 async function executeExtractJob(jobId, target, options) {
   try {
-    await withOptimizedTraversal(async function () {
-      var nodeId = target.nodeId;
-      if (!nodeId) {
-        throw new Error('missing nodeId in extract target');
-      }
+    await withJobHeartbeat(jobId, '单节点提取进行中...', async function () {
+      await withOptimizedTraversal(async function () {
+        var nodeId = target.nodeId;
+        if (!nodeId) {
+          throw new Error('missing nodeId in extract target');
+        }
 
-      var figmaNodeId = nodeId.replace(/-/g, ':');
-      var node = await figma.getNodeByIdAsync(figmaNodeId);
-      if (!node) {
-        throw new Error('node not found: ' + figmaNodeId);
-      }
+        var figmaNodeId = nodeId.replace(/-/g, ':');
+        var node = await figma.getNodeByIdAsync(figmaNodeId);
+        if (!node) {
+          throw new Error('node not found: ' + figmaNodeId);
+        }
 
-      var page = findPage(node);
-      var extraction = await extractNode(node, target.fileKey);
-      try {
-        if (figma.root && figma.root.name) extraction.meta.fileName = figma.root.name;
-      } catch (_) { /* ignore */ }
-      extraction = attachLegacyMetadata(extraction, page, [node], options, 'node');
-      await exportLegacyArtifacts(jobId, [node], page, extraction, options);
+        var page = findPage(node);
+        var extraction = await extractNode(node, target.fileKey, jobId);
+        try {
+          if (figma.root && figma.root.name) extraction.meta.fileName = figma.root.name;
+        } catch (_) { /* ignore */ }
+        extraction = attachLegacyMetadata(extraction, page, [node], options, 'node');
+        await exportLegacyArtifacts(jobId, [node], page, extraction, options);
 
-      postToUi('post-result', { jobId: jobId, data: extraction });
-      postToUi('status', { text: '提取完成 ✓ (' + countKeys(extraction.resources.nodeTypes) + ' 种节点)', state: 'ok' });
+        postToUi('post-result', { jobId: jobId, data: extraction });
+        postStatus(jobId, '提取完成 ✓ (' + countKeys(extraction.resources.nodeTypes) + ' 种节点)', 'ok');
+      });
     });
   } catch (error) {
     handleError(jobId, error);
@@ -1433,28 +1547,30 @@ async function executeExtractJob(jobId, target, options) {
 
 async function executeExtractSelectionJob(jobId, options) {
   try {
-    await withOptimizedTraversal(async function () {
-      var selection = figma.currentPage.selection;
-      if (!selection || selection.length === 0) {
-        throw new Error('Figma 中没有选中任何元素，请先选中目标节点');
-      }
+    await withJobHeartbeat(jobId, '选区提取进行中...', async function () {
+      await withOptimizedTraversal(async function () {
+        var selection = figma.currentPage.selection;
+        if (!selection || selection.length === 0) {
+          throw new Error('Figma 中没有选中任何元素，请先选中目标节点');
+        }
 
-      var extraction;
-      var sourceMode = selection.length > 1 ? 'selection-multi' : 'selection';
-      if (selection.length === 1) {
-        extraction = await extractNode(selection[0], null);
-      } else {
-        extraction = await extractMultipleNodes(selection);
-      }
+        var extraction;
+        var sourceMode = selection.length > 1 ? 'selection-multi' : 'selection';
+        if (selection.length === 1) {
+          extraction = await extractNode(selection[0], null, jobId);
+        } else {
+          extraction = await extractMultipleNodes(selection, jobId);
+        }
 
-      try {
-        if (figma.root && figma.root.name) extraction.meta.fileName = figma.root.name;
-      } catch (_) { /* ignore */ }
-      extraction = attachLegacyMetadata(extraction, figma.currentPage, selection.slice(), options, sourceMode);
-      await exportLegacyArtifacts(jobId, selection.slice(), figma.currentPage, extraction, options);
+        try {
+          if (figma.root && figma.root.name) extraction.meta.fileName = figma.root.name;
+        } catch (_) { /* ignore */ }
+        extraction = attachLegacyMetadata(extraction, figma.currentPage, selection.slice(), options, sourceMode);
+        await exportLegacyArtifacts(jobId, selection.slice(), figma.currentPage, extraction, options);
 
-      postToUi('post-result', { jobId: jobId, data: extraction });
-      postToUi('status', { text: '选区提取完成 ✓ (' + selection.length + ' 个节点)', state: 'ok' });
+        postToUi('post-result', { jobId: jobId, data: extraction });
+        postStatus(jobId, '选区提取完成 ✓ (' + selection.length + ' 个节点)', 'ok');
+      });
     });
   } catch (error) {
     handleError(jobId, error);
@@ -1463,37 +1579,39 @@ async function executeExtractSelectionJob(jobId, options) {
 
 async function executeExtractPagesJob(jobId, target, options) {
   try {
-    await withOptimizedTraversal(async function () {
-      var identifiers = target && target.pages ? target.pages : [];
-      var pages = findPagesByIdentifiers(identifiers);
-      if (pages.length === 0) {
-        throw new Error('未找到任何匹配页面，请检查 page 名称或 pageId');
-      }
+    await withJobHeartbeat(jobId, '页面 bundle 提取进行中...', async function () {
+      await withOptimizedTraversal(async function () {
+        var identifiers = target && target.pages ? target.pages : [];
+        var pages = findPagesByIdentifiers(identifiers);
+        if (pages.length === 0) {
+          throw new Error('未找到任何匹配页面，请检查 page 名称或 pageId');
+        }
 
-      var bundleId = createBundleId('pages-bundle');
-      var entries = [];
-      postToUi('status', { text: '正在提取 ' + pages.length + ' 个页面...', state: 'working' });
-      for (var i = 0; i < pages.length; i++) {
-        var page = pages[i];
-        var pageSelection = page.selection ? page.selection.slice() : [];
-        var entry = await buildBundlePageEntry(page, 'page', pageSelection, options);
-        entries.push(entry);
-        await exportBundlePageArtifacts(jobId, bundleId, page, entry, [page], pageSelection, options);
-      }
+        var bundleId = createBundleId('pages-bundle');
+        var entries = [];
+        postStatus(jobId, '正在提取 ' + pages.length + ' 个页面...', 'working');
+        for (var i = 0; i < pages.length; i++) {
+          var page = await ensurePageLoaded(pages[i]);
+          var pageSelection = page.selection ? page.selection.slice() : [];
+          var entry = await buildBundlePageEntry(page, 'page', pageSelection, options, jobId);
+          entries.push(entry);
+          await exportBundlePageArtifacts(jobId, bundleId, page, entry, [page], pageSelection, options);
+        }
 
-      var bundle = {
-        schemaVersion: 1,
-        kind: 'figma-bundle',
-        bundleId: bundleId,
-        bundleName: 'Pages bundle (' + pages.length + ' pages)',
-        createdAt: new Date().toISOString(),
-        source: 'extract-pages',
-        fileName: figma.root && figma.root.name ? figma.root.name : null,
-        pages: entries,
-      };
+        var bundle = {
+          schemaVersion: 1,
+          kind: 'figma-bundle',
+          bundleId: bundleId,
+          bundleName: 'Pages bundle (' + pages.length + ' pages)',
+          createdAt: new Date().toISOString(),
+          source: 'extract-pages',
+          fileName: figma.root && figma.root.name ? figma.root.name : null,
+          pages: entries,
+        };
 
-      postToUi('post-result', { jobId: jobId, data: bundle });
-      postToUi('status', { text: '页面 bundle 提取完成 ✓ (' + pages.length + ' 页)', state: 'ok' });
+        postToUi('post-result', { jobId: jobId, data: bundle });
+        postStatus(jobId, '页面 bundle 提取完成 ✓ (' + pages.length + ' 页)', 'ok');
+      });
     });
   } catch (error) {
     handleError(jobId, error);
@@ -1502,36 +1620,45 @@ async function executeExtractPagesJob(jobId, target, options) {
 
 async function executeExtractSelectedPagesBundleJob(jobId, options) {
   try {
-    await withOptimizedTraversal(async function () {
-      var pages = getPagesWithSelection();
-      if (pages.length === 0) {
-        throw new Error('没有页面保留 selection，请先在一个或多个页面中选中目标节点');
-      }
+    await withJobHeartbeat(jobId, '多页面 bundle 提取进行中...', async function () {
+      await withOptimizedTraversal(async function () {
+        var pages = [];
+        var allPages = listAllPages();
+        for (var pageIndex = 0; pageIndex < allPages.length; pageIndex++) {
+          var candidatePage = await ensurePageLoaded(allPages[pageIndex]);
+          if (candidatePage.selection && candidatePage.selection.length > 0) {
+            pages.push(candidatePage);
+          }
+        }
+        if (pages.length === 0) {
+          throw new Error('没有页面保留 selection，请先在一个或多个页面中选中目标节点');
+        }
 
-      var bundleId = createBundleId('selected-pages-bundle');
-      var entries = [];
-      postToUi('status', { text: '正在提取 ' + pages.length + ' 个带 selection 的页面...', state: 'working' });
-      for (var i = 0; i < pages.length; i++) {
-        var page = pages[i];
-        var pageSelection = page.selection.slice();
-        var entry = await buildBundlePageEntry(page, 'page-selection', pageSelection, options);
-        entries.push(entry);
-        await exportBundlePageArtifacts(jobId, bundleId, page, entry, pageSelection, pageSelection, options);
-      }
+        var bundleId = createBundleId('selected-pages-bundle');
+        var entries = [];
+        postStatus(jobId, '正在提取 ' + pages.length + ' 个带 selection 的页面...', 'working');
+        for (var i = 0; i < pages.length; i++) {
+          var page = await ensurePageLoaded(pages[i]);
+          var pageSelection = page.selection.slice();
+          var entry = await buildBundlePageEntry(page, 'page-selection', pageSelection, options, jobId);
+          entries.push(entry);
+          await exportBundlePageArtifacts(jobId, bundleId, page, entry, pageSelection, pageSelection, options);
+        }
 
-      var bundle = {
-        schemaVersion: 1,
-        kind: 'figma-bundle',
-        bundleId: bundleId,
-        bundleName: 'Selected pages bundle (' + pages.length + ' pages)',
-        createdAt: new Date().toISOString(),
-        source: 'extract-selected-pages-bundle',
-        fileName: figma.root && figma.root.name ? figma.root.name : null,
-        pages: entries,
-      };
+        var bundle = {
+          schemaVersion: 1,
+          kind: 'figma-bundle',
+          bundleId: bundleId,
+          bundleName: 'Selected pages bundle (' + pages.length + ' pages)',
+          createdAt: new Date().toISOString(),
+          source: 'extract-selected-pages-bundle',
+          fileName: figma.root && figma.root.name ? figma.root.name : null,
+          pages: entries,
+        };
 
-      postToUi('post-result', { jobId: jobId, data: bundle });
-      postToUi('status', { text: '多页面 selection bundle 提取完成 ✓ (' + pages.length + ' 页)', state: 'ok' });
+        postToUi('post-result', { jobId: jobId, data: bundle });
+        postStatus(jobId, '多页面 selection bundle 提取完成 ✓ (' + pages.length + ' 页)', 'ok');
+      });
     });
   } catch (error) {
     handleError(jobId, error);
@@ -1544,28 +1671,28 @@ figma.ui.onmessage = function (msg) {
   if (msg.type === 'extract') {
     var payload = msg.payload || msg;
     if (!payload.jobId || !payload.target) {
-      postToUi('status', { text: '无效的 extract 指令：缺少 jobId 或 target', state: 'error' });
+      postStatus(null, '无效的 extract 指令：缺少 jobId 或 target', 'error');
       return;
     }
     executeExtractJob(payload.jobId, payload.target, payload.options || {}).catch(function (err) { handleError(payload.jobId, err); });
   } else if (msg.type === 'extract-selection') {
     var selPayload = msg.payload || msg;
     if (!selPayload.jobId) {
-      postToUi('status', { text: '无效的 extract-selection 指令：缺少 jobId', state: 'error' });
+      postStatus(null, '无效的 extract-selection 指令：缺少 jobId', 'error');
       return;
     }
     executeExtractSelectionJob(selPayload.jobId, selPayload.options || {}).catch(function (err) { handleError(selPayload.jobId, err); });
   } else if (msg.type === 'extract-pages') {
     var pagesPayload = msg.payload || msg;
     if (!pagesPayload.jobId || !pagesPayload.target || !pagesPayload.target.pages) {
-      postToUi('status', { text: '无效的 extract-pages 指令：缺少 jobId 或 pages', state: 'error' });
+      postStatus(null, '无效的 extract-pages 指令：缺少 jobId 或 pages', 'error');
       return;
     }
     executeExtractPagesJob(pagesPayload.jobId, pagesPayload.target, pagesPayload.options || {}).catch(function (err) { handleError(pagesPayload.jobId, err); });
   } else if (msg.type === 'extract-selected-pages-bundle') {
     var bundlePayload = msg.payload || msg;
     if (!bundlePayload.jobId) {
-      postToUi('status', { text: '无效的 extract-selected-pages-bundle 指令：缺少 jobId', state: 'error' });
+      postStatus(null, '无效的 extract-selected-pages-bundle 指令：缺少 jobId', 'error');
       return;
     }
     executeExtractSelectedPagesBundleJob(bundlePayload.jobId, bundlePayload.options || {}).catch(function (err) { handleError(bundlePayload.jobId, err); });

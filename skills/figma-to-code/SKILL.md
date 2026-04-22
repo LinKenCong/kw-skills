@@ -60,7 +60,15 @@ Proceed only when:
 - bridge is reachable
 - plugin is connected in Figma Desktop
 
-If not connected, instruct the user to run the imported plugin inside the correct Figma file.
+When asking the user to confirm plugin connection or current selection, also include first-run install guidance:
+- Figma Desktop → Plugins → Development → Import plugin from manifest...
+- manifest path: `<skill>/plugin/manifest.json`
+
+If not connected, instruct the user to import that manifest if needed, then run the plugin inside the correct Figma file.
+
+The `ensure` / `health` output also includes:
+- `pluginManifestPath`
+- `workspaceCacheRoot`
 
 ## 2. Choose extraction scope
 
@@ -104,6 +112,9 @@ Recommendation:
 
 Never default to opening `extraction.json` directly.
 Use query commands.
+
+Default runtime cache root:
+- `<workspace>/.figma-to-code/`
 
 ### Structure
 
@@ -200,6 +211,9 @@ A good run should leave you with one of these:
 - `indexes/pages.json`
 - `indexes/screenshots.json`
 - `indexes/regions.json`
+- `indexes/variables.json`
+- `indexes/components.json`
+- `indexes/css.json`
 - per-page `page.json`, `extraction.json`, `regions.level1.json`, `regions.level2.json`
 - per-page screenshot directories
 
@@ -209,6 +223,7 @@ A good run should leave you with one of these:
 - run `ensure`
 - run `health`
 - confirm the plugin is open in Figma Desktop
+- if the plugin has not been imported yet, use `<skill>/plugin/manifest.json`
 
 ### No pages returned by bundle extraction
 - for `extract-pages`, verify page names/IDs

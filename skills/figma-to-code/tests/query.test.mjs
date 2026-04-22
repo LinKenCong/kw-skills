@@ -329,6 +329,75 @@ function createBundleCacheFixtureWithSanitizedPageId() {
   return dir;
 }
 
+function createBundleIndexOnlyFixture() {
+  const dir = makeTempDir('figma-to-code-bundle-index-only-');
+  writeJson(path.join(dir, 'bundle.json'), {
+    schemaVersion: 1,
+    kind: 'figma-bundle',
+    bundleId: 'bundle-index-only',
+    bundleName: 'Index only bundle',
+    createdAt: '2026-04-22T10:00:00.000Z',
+    pages: ['pg-home'],
+  });
+
+  writeJson(path.join(dir, 'indexes', 'pages.json'), {
+    pages: [
+      {
+        pageId: 'pg-home',
+        pageName: 'Home',
+        path: 'pages/pg-home/page.json',
+        nodeCount: 3,
+        selectionCount: 1,
+        screenshotCount: 1,
+      },
+    ],
+  });
+
+  writeJson(path.join(dir, 'indexes', 'variables.json'), {
+    variables: {
+      flat: {
+        colors: {
+          '--color-brand': '#0055ff',
+        },
+        numbers: {
+          '--space-6': 24,
+        },
+        strings: {},
+        booleans: {},
+      },
+    },
+  });
+
+  writeJson(path.join(dir, 'indexes', 'components.json'), {
+    components: [
+      {
+        pageId: 'pg-home',
+        pageName: 'Home',
+        nodeId: '88:1',
+        nodeName: 'Promo Card',
+        type: 'INSTANCE',
+        mainComponent: { id: '500:1', name: 'Card/Promo', key: 'card-promo' },
+      },
+    ],
+  });
+
+  writeJson(path.join(dir, 'indexes', 'css.json'), {
+    available: false,
+    reason: 'No css hints recorded in this bundle cache',
+    pages: [
+      {
+        pageId: 'pg-home',
+        pageName: 'Home',
+        available: false,
+        reason: 'No css hints recorded for this page',
+        css: null,
+      },
+    ],
+  });
+
+  return dir;
+}
+
 test('query capabilities exposes stable capability registry', async () => {
   const legacyDir = createLegacyCacheFixture();
   const result = await handleQuery(['capabilities', '--cache', legacyDir]);
@@ -396,6 +465,36 @@ test('bundle queries read extraction files from sanitized page directories', asy
   assert.equal(result.components.length, 1);
   assert.equal(result.components[0].pageId, '12:34');
   assert.equal(result.components[0].mainComponent.name, 'Card/Promo');
+});
+
+test('bundle variable query prefers prebuilt index files when page extraction files are absent', async () => {
+  const bundleDir = createBundleIndexOnlyFixture();
+  const result = await handleQuery(['variables', '--cache', bundleDir]);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.cacheKind, 'bundle');
+  assert.equal(result.variables.flat.colors['--color-brand'], '#0055ff');
+});
+
+test('bundle components query prefers prebuilt index files when page extraction files are absent', async () => {
+  const bundleDir = createBundleIndexOnlyFixture();
+  const result = await handleQuery(['components', '--cache', bundleDir]);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.cacheKind, 'bundle');
+  assert.equal(result.components.length, 1);
+  assert.equal(result.components[0].mainComponent.name, 'Card/Promo');
+});
+
+test('bundle css query prefers prebuilt index files when page extraction files are absent', async () => {
+  const bundleDir = createBundleIndexOnlyFixture();
+  const result = await handleQuery(['css', '--cache', bundleDir]);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.cacheKind, 'bundle');
+  assert.equal(result.available, false);
+  assert.equal(result.pages.length, 1);
+  assert.match(result.reason, /No css hints/i);
 });
 
 test('legacy tree query remains backward compatible', async () => {

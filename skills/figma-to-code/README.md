@@ -41,13 +41,19 @@ Machine-readable registry:
 
 1. Open Figma Desktop
 2. Go to Plugins → Development → Import plugin from manifest...
-3. Select `figma-to-code/plugin/manifest.json`
+3. Select the plugin manifest:
+   - repo-local example: `skills/figma-to-code/plugin/manifest.json`
+   - resolved skill path: `<skill>/plugin/manifest.json`
 
 ### 2. Start or ensure the bridge
 
 ```bash
 node figma-to-code/scripts/bridge_client.mjs ensure
 ```
+
+The output now includes:
+- `pluginManifestPath`
+- `workspaceCacheRoot`
 
 ### 3. Run the plugin in the target file
 
@@ -103,12 +109,20 @@ This is the preferred restoration path when you keep selections on multiple page
 
 ## Cache layouts
 
+By default, extraction output is written under the caller workspace root:
+
+```text
+.figma-to-code/
+```
+
+This keeps runtime caches out of the installed skill directory.
+
 ### Legacy extraction cache
 
 Used by `extract` and `extract-selection`.
 
 ```text
-cache/<fileKey>/<nodeId>/
+.figma-to-code/<fileKey>/<nodeId>/
   extraction.json
   page.json
   regions.level1.json
@@ -131,12 +145,15 @@ cache/<fileKey>/<nodeId>/
 Used by `extract-pages` and `extract-selected-pages-bundle`.
 
 ```text
-cache/bundles/<bundleId>/
+.figma-to-code/bundles/<bundleId>/
   bundle.json
   indexes/
     pages.json
     screenshots.json
     regions.json
+    variables.json
+    components.json
+    css.json
   pages/<pageId>/
     page.json
     extraction.json
@@ -178,6 +195,8 @@ node figma-to-code/scripts/bridge_client.mjs query variables --cache <cacheDir>
 node figma-to-code/scripts/bridge_client.mjs query components --cache <cacheDir>
 node figma-to-code/scripts/bridge_client.mjs query css --cache <cacheDir>
 ```
+
+For bundle caches, `query variables`, `query components`, and `query css` prefer prebuilt indexes before falling back to per-page extraction files.
 
 ## Design fidelity artifacts
 
@@ -222,7 +241,7 @@ npm run check
 
 Bridge is running but no plugin is connected:
 1. Confirm Figma Desktop is open
-2. Confirm the plugin was imported from `plugin/manifest.json`
+2. Confirm the plugin was imported from `skills/figma-to-code/plugin/manifest.json` or the resolved `<skill>/plugin/manifest.json`
 3. Run the plugin inside the correct Figma file
 4. Wait for `Bridge SSE 已连接` in the plugin UI
 
@@ -259,12 +278,14 @@ figma-to-code/
 │   ├── validate.mjs
 │   └── visual-diff.mjs
 ├── tests/
+│   ├── bridge.test.mjs
+│   ├── bridge_client.test.mjs
 │   └── query.test.mjs
 ├── references/
 │   ├── coding-guide.md
 │   ├── plugin-install.md
 │   └── regression-acceptance.md
-└── cache/
+└── cache/                      # legacy sample dir only; runtime cache defaults to ../.figma-to-code/
 ```
 
 ## License

@@ -19,7 +19,9 @@
       "outputs": {
         "ok": "boolean",
         "pluginConnected": "boolean",
-        "uptime": "number"
+        "uptime": "number",
+        "activeJobs": "number",
+        "defaultCacheRoot": "string"
       },
       "officialApi": []
     },
@@ -41,7 +43,7 @@
         "options": ["exportAssets", "exportFormats", "screenshot", "nodeScreenshots"]
       },
       "outputs": {
-        "cache": "legacy extraction cache directory",
+        "cache": "legacy extraction cache directory under the caller workspace",
         "result": "extraction schema v2+"
       },
       "officialApi": ["figma.getNodeByIdAsync", "exportAsync", "getStyledTextSegments", "boundVariables", "inferredVariables"]
@@ -63,7 +65,7 @@
         "options": ["exportAssets", "exportFormats", "screenshot", "nodeScreenshots"]
       },
       "outputs": {
-        "cache": "legacy extraction cache directory with screenshot manifest and region manifests when available",
+        "cache": "legacy extraction cache directory with screenshot manifest and region manifests when available, under the caller workspace",
         "result": "extraction schema with multi-select metadata"
       },
       "officialApi": ["figma.currentPage.selection", "exportAsync", "getStyledTextSegments", "figma.root"]
@@ -86,7 +88,7 @@
         "options": ["exportAssets", "pageScreenshots", "nodeScreenshots"]
       },
       "outputs": {
-        "cache": "bundle cache directory",
+        "cache": "bundle cache directory under the caller workspace",
         "result": "bundle schema with pages/indexes"
       },
       "officialApi": ["figma.root", "PageNode.selection", "exportAsync", "findAllWithCriteria", "figma.skipInvisibleInstanceChildren"]
@@ -108,7 +110,7 @@
         "options": ["exportAssets", "pageScreenshots", "nodeScreenshots"]
       },
       "outputs": {
-        "cache": "bundle cache directory",
+        "cache": "bundle cache directory under the caller workspace",
         "result": "bundle schema with selected pages only"
       },
       "officialApi": ["figma.root", "PageNode.selection", "exportAsync", "findAllWithCriteria", "figma.skipInvisibleInstanceChildren"]

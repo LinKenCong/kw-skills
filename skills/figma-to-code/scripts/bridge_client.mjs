@@ -9,22 +9,23 @@ const __dirname = path.dirname(__filename);
 const BRIDGE_FILE = path.resolve(__dirname, '..', 'bridge.mjs');
 const BRIDGE_URL = 'http://localhost:3333';
 const CAPABILITIES_FILE = path.resolve(__dirname, '..', 'plugin', 'capabilities.json');
+const PLUGIN_MANIFEST_FILE = path.resolve(__dirname, '..', 'plugin', 'manifest.json');
+const DEFAULT_CACHE_DIRNAME = '.figma-to-code';
 const STARTUP_RETRIES = 12;
 const STARTUP_WAIT_MS = 500;
-const BASE_REQUEST_TIMEOUT_MS = 60_000;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function fetchJson(url, options, timeoutMs) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs || 3000);
+  const controller = timeoutMs ? new AbortController() : null;
+  const timer = timeoutMs ? setTimeout(() => controller.abort(), timeoutMs) : null;
   try {
-    const response = await fetch(url, { ...options, signal: controller.signal });
+    const response = await fetch(url, controller ? { ...options, signal: controller.signal } : options);
     return { ok: response.ok, status: response.status, data: await response.json() };
   } finally {
-    clearTimeout(timer);
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -38,10 +39,15 @@ async function getHealth() {
 }
 
 function startBridge() {
+  const env = {
+    ...process.env,
+    FIGMA_TO_CODE_CACHE_ROOT: resolveWorkspaceCacheRoot(),
+  };
   const child = spawn(process.execPath, [BRIDGE_FILE], {
     cwd: path.dirname(BRIDGE_FILE),
     detached: true,
     stdio: 'ignore',
+    env,
   });
   child.unref();
   return child.pid;
@@ -61,39 +67,51 @@ async function ensureBridge() {
   return { ok: false, started: true, pid, error: 'Bridge 启动超时' };
 }
 
-function parseFlags(args) {
+export function resolveWorkspaceCacheRoot(cwd = process.cwd()) {
+  return path.resolve(cwd, DEFAULT_CACHE_DIRNAME);
+}
+
+export function buildRequestContext(cwd = process.cwd()) {
+  return {
+    workspaceRoot: path.resolve(cwd),
+    cacheRoot: resolveWorkspaceCacheRoot(cwd),
+  };
+}
+
+export function parseFlags(args) {
   const flags = {
     assets: false,
     screenshot: false,
     pageScreenshots: false,
-    selectionUnion: false,
     nodeScreenshots: false,
     pages: '',
   };
   const positional = [];
+  const errors = [];
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === '--assets') flags.assets = true;
     else if (arg === '--screenshot') flags.screenshot = true;
     else if (arg === '--page-screenshots') flags.pageScreenshots = true;
-    else if (arg === '--selection-union') flags.selectionUnion = true;
+    else if (arg === '--selection-union') {
+      errors.push('--selection-union has been removed. Use --node-screenshots instead.');
+    }
     else if (arg === '--node-screenshots') flags.nodeScreenshots = true;
     else if (arg === '--pages' && i + 1 < args.length) flags.pages = args[++i];
     else positional.push(arg);
   }
 
-  return { flags, input: positional.join(' ').trim() };
+  return { flags, input: positional.join(' ').trim(), errors };
 }
 
-function buildExtractOptions(flags, defaults = {}) {
+export function buildExtractOptions(flags, defaults = {}) {
   return {
     exportAssets: flags.assets,
     exportFormats: flags.assets ? ['SVG', 'PNG'] : [],
     screenshot: flags.screenshot || !!defaults.screenshot,
     pageScreenshots: flags.pageScreenshots || !!defaults.pageScreenshots,
-    selectionUnionScreenshot: flags.selectionUnion || !!defaults.selectionUnionScreenshot,
-    nodeScreenshots: flags.nodeScreenshots || flags.selectionUnion || !!defaults.nodeScreenshots,
+    nodeScreenshots: flags.nodeScreenshots || !!defaults.nodeScreenshots,
   };
 }
 
@@ -113,30 +131,23 @@ function printResult(result) {
   if (!result || result.ok !== true) process.exitCode = 1;
 }
 
-function resolveRequestTimeoutMs(pathname, body) {
-  let workUnits = 1;
-  const options = body && body.options ? body.options : {};
-
-  if (options.screenshot || options.pageScreenshots || options.selectionUnionScreenshot || options.nodeScreenshots) {
-    workUnits += 2;
-  }
-  if (pathname === '/extract-pages' || pathname === '/extract-selected-pages-bundle') {
-    workUnits += 1;
-  }
-
-  return (BASE_REQUEST_TIMEOUT_MS * workUnits) + 15_000;
-}
-
 async function postJson(pathname, body) {
   const ensured = await ensureBridge();
   if (!ensured.ok) return ensured;
 
   try {
+    const payload = {
+      ...(body || {}),
+      context: {
+        ...buildRequestContext(),
+        ...((body && body.context) || {}),
+      },
+    };
     const result = await fetchJson(`${BRIDGE_URL}${pathname}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    }, resolveRequestTimeoutMs(pathname, body));
+      body: JSON.stringify(payload),
+    });
     return result.data;
   } catch (error) {
     return { ok: false, error: error.message };
@@ -149,12 +160,21 @@ async function main() {
 
   if (command === 'health') {
     const health = await getHealth();
-    printResult(health ? { ok: true, health } : { ok: false, error: 'Bridge 未启动或不可达' });
+    printResult(health ? {
+      ok: true,
+      health,
+      pluginManifestPath: PLUGIN_MANIFEST_FILE,
+      workspaceCacheRoot: resolveWorkspaceCacheRoot(),
+    } : { ok: false, error: 'Bridge 未启动或不可达' });
     return;
   }
 
   if (command === 'ensure') {
-    printResult(await ensureBridge());
+    printResult({
+      ...(await ensureBridge()),
+      pluginManifestPath: PLUGIN_MANIFEST_FILE,
+      workspaceCacheRoot: resolveWorkspaceCacheRoot(),
+    });
     return;
   }
 
@@ -164,7 +184,11 @@ async function main() {
   }
 
   if (command === 'extract') {
-    const { flags, input } = parseFlags(restArgs);
+    const { flags, input, errors } = parseFlags(restArgs);
+    if (errors.length > 0) {
+      printResult({ ok: false, error: errors.join(' ') });
+      return;
+    }
     if (!input) {
       printResult({ ok: false, error: '用法: bridge_client.mjs extract "<figma-url-or-nodeId>" [--assets] [--screenshot] [--node-screenshots]' });
       return;
@@ -178,7 +202,11 @@ async function main() {
   }
 
   if (command === 'extract-selection') {
-    const { flags } = parseFlags(restArgs);
+    const { flags, errors } = parseFlags(restArgs);
+    if (errors.length > 0) {
+      printResult({ ok: false, error: errors.join(' ') });
+      return;
+    }
     printResult(await postJson('/extract-selection', {
       options: buildExtractOptions(flags),
     }));
@@ -186,7 +214,11 @@ async function main() {
   }
 
   if (command === 'extract-pages') {
-    const { flags } = parseFlags(restArgs);
+    const { flags, errors } = parseFlags(restArgs);
+    if (errors.length > 0) {
+      printResult({ ok: false, error: errors.join(' ') });
+      return;
+    }
     const pages = String(flags.pages || '').split(',').map((item) => item.trim()).filter(Boolean);
     if (pages.length === 0) {
       printResult({ ok: false, error: '用法: bridge_client.mjs extract-pages --pages "Page A,Page B" [--assets] [--page-screenshots] [--node-screenshots]' });
@@ -203,7 +235,11 @@ async function main() {
   }
 
   if (command === 'extract-selected-pages-bundle') {
-    const { flags } = parseFlags(restArgs);
+    const { flags, errors } = parseFlags(restArgs);
+    if (errors.length > 0) {
+      printResult({ ok: false, error: errors.join(' ') });
+      return;
+    }
     printResult(await postJson('/extract-selected-pages-bundle', {
       options: buildExtractOptions(flags, {
         pageScreenshots: true,
@@ -225,7 +261,11 @@ async function main() {
   });
 }
 
-main().catch((error) => {
-  console.error(JSON.stringify({ ok: false, error: error.message }, null, 2));
-  process.exitCode = 1;
-});
+const isDirectRun = process.argv[1] && path.resolve(process.argv[1]) === __filename;
+
+if (isDirectRun) {
+  main().catch((error) => {
+    console.error(JSON.stringify({ ok: false, error: error.message }, null, 2));
+    process.exitCode = 1;
+  });
+}

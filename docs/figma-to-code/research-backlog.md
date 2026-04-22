@@ -56,17 +56,16 @@
 
 ### 4. Bundle scale and query performance
 
-当前 query 仍主要建立在“读 cache 文件后再裁剪”的模型上。
+当前 bundle 聚合查询已经对 `pages` / `screenshots` / `regions` / `variables` / `components` / `css` 建立了 index-first 路径，但结构查询仍有读放大。
 
 可继续研究的方向：
-- page / node index
 - subtree shards
-- index-first query
+- page / node index 的进一步细化
 - 大 bundle 下的读取性能
 - Agent token 消耗控制
 
 价值：
-- 降低大文件、多页 bundle 的读放大
+- 继续降低 tree / subtree / node 类查询在大文件、多页 bundle 下的读放大
 - 减少 query latency 和重复解析成本
 
 ### 5. Dynamic-page and page loading strategy

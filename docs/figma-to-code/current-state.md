@@ -58,6 +58,7 @@
 - page 目录由 bridge 生成稳定目录名；消费方不应假设 raw `pageId` 可直接用于路径拼接。
 - 页面内仍可包含 node-scoped 目录，用于保存页面下各节点的直接导出资源。
 - 应优先用 `query pages`、`query screenshots`、`query regions` 和 bundle metadata 访问这些内容，而不是手写路径推导。
+- `query variables`、`query components`、`query css` 已优先读取 bundle index，再在旧 bundle 上回退到 page extraction 文件。
 
 ## 已确认的关键设计决策
 
@@ -104,6 +105,6 @@
 
 ## 当前仍成立的实现限制
 
-- query 主要仍基于已有 cache 文件做读取与裁剪，不是 index-first / shard-first 设计。
+- bundle 聚合查询已部分转向 index-first，但 tree / subtree / node / text / palette 这类结构查询仍依赖 page extraction 文件，不是 shard-first 设计。
 - style definition、mode-aware token graph、team library token 等更高层语义仍未进入稳定能力面。
 - 真正的“产品级完全可用”判断仍取决于更完整的真实 Figma Desktop live 验证，而不只取决于自动化测试。

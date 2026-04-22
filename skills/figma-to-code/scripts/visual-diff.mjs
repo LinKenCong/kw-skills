@@ -11,8 +11,8 @@
  * mismatch analysis. Regions are defined by Figma bounding boxes.
  *
  * @example
- *   node visual-diff.mjs --design screenshot.png --html golden-reference.html --out-dir ./cache/43-1047
- *   node visual-diff.mjs --design screenshot.png --html golden-reference.html --out-dir ./cache/43-1047 --regions '[{"name":"hero","x":0,"y":0,"w":1280,"h":600}]' --json
+ *   node visual-diff.mjs --design screenshot.png --html golden-reference.html --out-dir ./.figma-to-code/43-1047
+ *   node visual-diff.mjs --design screenshot.png --html golden-reference.html --out-dir ./.figma-to-code/43-1047 --regions '[{"name":"hero","x":0,"y":0,"w":1280,"h":600}]' --json
  */
 
 import { parseArgs } from 'node:util';

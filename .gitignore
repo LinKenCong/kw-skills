@@ -10,3 +10,4 @@
 *.tar
 *.tgz
 *.tmp
+.figma-to-code/

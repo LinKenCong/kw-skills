@@ -4,7 +4,7 @@
 
 1. Open **Figma Desktop** (must be the desktop app, not the browser version)
 2. Go to menu: **Plugins → Development → Import plugin from manifest...**
-3. In the file picker, navigate to `figma-to-code/plugin/manifest.json`
+3. In the file picker, navigate to the resolved skill manifest path: `<skill>/plugin/manifest.json`
 4. Click confirm to import
 
 After successful import, **"Figma Bridge Extractor"** will appear under **Plugins → Development**.
@@ -19,6 +19,8 @@ After successful import, **"Figma Bridge Extractor"** will appear under **Plugin
    - "Bridge SSE Connected" (green) → Ready
    - "Bridge SSE Disconnected" (red) → Start the Bridge first: `node <skill>/scripts/bridge_client.mjs ensure`
 4. Once connected, the plugin automatically waits for and relays extraction commands from the Bridge.
+
+When guiding a user manually, prefer giving the resolved absolute manifest path instead of only a repo-relative fragment.
 
 ## Troubleshooting NO_PLUGIN_CONNECTION
 

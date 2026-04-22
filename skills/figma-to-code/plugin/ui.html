@@ -135,6 +135,17 @@ window.onmessage = function (event) {
 
   if (msg.type === 'status') {
     setStatus(msg.text, msg.state);
+    if (msg.jobId) {
+      queueJobRequest(msg.jobId, function () {
+        return postBridgeJson('/jobs/' + encodeURIComponent(msg.jobId) + '/progress', {
+          text: msg.text || null,
+          state: msg.state || null,
+        });
+      })
+      .catch(function (error) {
+        appendLog('进度发送失败: ' + error.message);
+      });
+    }
   }
 
   if (msg.type === 'post-result') {
