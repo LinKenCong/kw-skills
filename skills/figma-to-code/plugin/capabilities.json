@@ -74,18 +74,18 @@
       "id": "extract.pages",
       "status": "stable",
       "layer": "plugin",
-      "purpose": "Extract one or more pages into a bundle cache with per-page metadata, screenshots, and region manifests.",
+      "purpose": "Extract one or more pages into a bundle cache with per-page metadata, screenshots, and region manifests. This is restricted full-page mode and must be explicitly opted into.",
       "bridge": {
         "method": "POST",
         "path": "/extract-pages",
         "event": "extract-pages"
       },
       "cli": {
-        "command": "node figma-to-code/scripts/bridge_client.mjs extract-pages --pages \"Home,Pricing\" [--assets] [--page-screenshots] [--node-screenshots]"
+        "command": "node figma-to-code/scripts/bridge_client.mjs extract-pages --pages \"Home,Pricing\" --allow-full-page [--assets] [--page-screenshots] [--node-screenshots]"
       },
       "inputs": {
         "pages": "comma-separated page ids or names",
-        "options": ["exportAssets", "pageScreenshots", "nodeScreenshots"]
+        "options": ["allowFullPage", "exportAssets", "pageScreenshots", "nodeScreenshots"]
       },
       "outputs": {
         "cache": "bundle cache directory under the caller workspace",

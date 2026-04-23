@@ -22,13 +22,23 @@ test('buildExtractOptions keeps node screenshot behavior without selection-union
     screenshot: true,
     pageScreenshots: false,
     nodeScreenshots: true,
+    allowFullPage: false,
     pages: '',
   });
 
   assert.deepEqual(options.exportFormats, ['SVG', 'PNG']);
   assert.equal(options.screenshot, true);
   assert.equal(options.nodeScreenshots, true);
+  assert.equal(options.allowFullPage, false);
   assert.equal('selectionUnionScreenshot' in options, false);
+});
+
+test('parseFlags requires explicit allow-full-page opt-in for extract-pages style calls', () => {
+  const result = parseFlags(['--pages', 'Home,Pricing', '--allow-full-page']);
+
+  assert.equal(result.errors.length, 0);
+  assert.equal(result.flags.pages, 'Home,Pricing');
+  assert.equal(result.flags.allowFullPage, true);
 });
 
 test('buildRequestContext resolves a project-local .figma-to-code cache root', () => {

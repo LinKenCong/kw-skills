@@ -95,11 +95,12 @@ Purpose:
 - extract one or more explicit pages as a bundle cache
 
 CLI:
-- `node figma-to-code/scripts/bridge_client.mjs extract-pages --pages "Home,Pricing" [--assets] [--page-screenshots] [--node-screenshots]`
+- `node figma-to-code/scripts/bridge_client.mjs extract-pages --pages "Home,Pricing" --allow-full-page [--assets] [--page-screenshots] [--node-screenshots]`
 
 Bridge:
 - `POST /extract-pages`
 - SSE event: `extract-pages`
+- requires explicit full-page opt-in (`options.allowFullPage=true` / `--allow-full-page`)
 
 Official APIs used:
 - `figma.root`

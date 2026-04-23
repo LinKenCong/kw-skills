@@ -96,8 +96,13 @@ Notes:
 ### C. Explicit pages → bundle cache
 
 ```bash
-node figma-to-code/scripts/bridge_client.mjs extract-pages --pages "Home,Pricing" --page-screenshots --node-screenshots
+node figma-to-code/scripts/bridge_client.mjs extract-pages --pages "Home,Pricing" --allow-full-page --page-screenshots --node-screenshots
 ```
+
+Guardrail:
+- `extract-pages` is restricted full-page mode
+- for most work, prefer `extract-selection`
+- if the user has no current selection and did not provide a node target, do not fall back to full-page extraction
 
 ### D. All pages with persisted selection → bundle cache
 
@@ -248,6 +253,7 @@ Bridge is running but no plugin is connected:
 ### No pages found for `extract-pages`
 
 - Confirm the names or page IDs match the open file exactly
+- `extract-pages` also requires explicit `--allow-full-page`
 - Use the selected-pages bundle path if the workflow is selection-driven rather than full-page driven
 
 ### `extract-selected-pages-bundle` returns no pages

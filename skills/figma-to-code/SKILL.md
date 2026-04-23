@@ -89,12 +89,19 @@ node <skill>/scripts/bridge_client.mjs extract-selection --assets --screenshot -
 ```
 
 ### Use `extract-pages` when:
-- user wants explicit named pages extracted as a bundle
-- restoration scope is page-oriented rather than one node
+- user explicitly requests full-page extraction by name
+- selection-based extraction is not sufficient
+- you deliberately opt in to a heavier page-oriented run
 
 ```bash
-node <skill>/scripts/bridge_client.mjs extract-pages --pages "Home,Pricing" --page-screenshots --node-screenshots
+node <skill>/scripts/bridge_client.mjs extract-pages --pages "Home,Pricing" --allow-full-page --page-screenshots --node-screenshots
 ```
+
+Default extraction policy:
+- do not use `extract-pages` just because the plugin is connected
+- prefer `extract-selection` for current-page work
+- prefer `extract-selected-pages-bundle` only when the user intentionally preserved selections on multiple pages
+- if the user has no selection and did not provide a node ID / Figma URL, stop and ask for selection or an explicit target instead of extracting a full page
 
 ### Use `extract-selected-pages-bundle` when:
 - user preserved selections on multiple pages

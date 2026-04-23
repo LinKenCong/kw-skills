@@ -84,6 +84,7 @@ export function parseFlags(args) {
     screenshot: false,
     pageScreenshots: false,
     nodeScreenshots: false,
+    allowFullPage: false,
     pages: '',
   };
   const positional = [];
@@ -94,6 +95,7 @@ export function parseFlags(args) {
     if (arg === '--assets') flags.assets = true;
     else if (arg === '--screenshot') flags.screenshot = true;
     else if (arg === '--page-screenshots') flags.pageScreenshots = true;
+    else if (arg === '--allow-full-page') flags.allowFullPage = true;
     else if (arg === '--selection-union') {
       errors.push('--selection-union has been removed. Use --node-screenshots instead.');
     }
@@ -112,6 +114,7 @@ export function buildExtractOptions(flags, defaults = {}) {
     screenshot: flags.screenshot || !!defaults.screenshot,
     pageScreenshots: flags.pageScreenshots || !!defaults.pageScreenshots,
     nodeScreenshots: flags.nodeScreenshots || !!defaults.nodeScreenshots,
+    allowFullPage: !!flags.allowFullPage,
   };
 }
 
@@ -221,7 +224,14 @@ async function main() {
     }
     const pages = String(flags.pages || '').split(',').map((item) => item.trim()).filter(Boolean);
     if (pages.length === 0) {
-      printResult({ ok: false, error: '用法: bridge_client.mjs extract-pages --pages "Page A,Page B" [--assets] [--page-screenshots] [--node-screenshots]' });
+      printResult({ ok: false, error: '用法: bridge_client.mjs extract-pages --pages "Page A,Page B" --allow-full-page [--assets] [--page-screenshots] [--node-screenshots]' });
+      return;
+    }
+    if (!flags.allowFullPage) {
+      printResult({
+        ok: false,
+        error: 'extract-pages 已被收紧为显式 full-page 能力。默认请使用 extract-selection 或 extract-selected-pages-bundle；只有在用户明确要求整页提取时，才加 --allow-full-page。',
+      });
       return;
     }
 

@@ -34,6 +34,7 @@
 const BRIDGE_URL = 'http://localhost:3333';
 let eventSource = null;
 let lastBridgeKey = '';
+const MAX_LOG_ENTRIES = 80;
 const jobRequestQueues = new Map();
 
 function escapeHtml(str) {
@@ -42,14 +43,21 @@ function escapeHtml(str) {
 
 function appendLog(text) {
   const log = document.getElementById('log');
-  log.innerHTML = escapeHtml(new Date().toLocaleTimeString()) + ' ' + escapeHtml(text) + '<br>' + log.innerHTML;
+  const line = document.createElement('div');
+  line.textContent = new Date().toLocaleTimeString() + ' ' + text;
+  log.prepend(line);
+  while (log.childElementCount > MAX_LOG_ENTRIES) {
+    log.removeChild(log.lastElementChild);
+  }
 }
 
-function setStatus(text, state) {
+function setStatus(text, state, options) {
   const el = document.getElementById('status');
   el.textContent = text;
   el.className = 'card ' + (state || '');
-  appendLog(text);
+  if (!options || options.log !== false) {
+    appendLog(text);
+  }
 }
 
 function setBridge(text, state) {
@@ -95,8 +103,20 @@ function registerJobEvent(eventName, label, forwardType) {
         setBridge('收到无效 ' + eventName + ' job', 'error');
         return;
       }
-      setStatus('收到' + label + '任务 ' + payload.jobId.slice(0, 8), 'working');
-      forwardToPlugin(forwardType || eventName, payload);
+      const receivedText = '收到' + label + '任务 ' + payload.jobId.slice(0, 8);
+      setStatus(receivedText, 'working', { log: true });
+      queueJobRequest(payload.jobId, function () {
+        return postBridgeJson('/jobs/' + encodeURIComponent(payload.jobId) + '/progress', {
+          text: receivedText,
+          state: 'working',
+        });
+      })
+      .catch(function (error) {
+        appendLog('任务接收确认失败: ' + error.message);
+      })
+      .then(function () {
+        forwardToPlugin(forwardType || eventName, payload);
+      });
     } catch (error) {
       setBridge('事件解析失败', 'error');
     }
@@ -134,8 +154,8 @@ window.onmessage = function (event) {
   if (!msg) return;
 
   if (msg.type === 'status') {
-    setStatus(msg.text, msg.state);
-    if (msg.jobId) {
+    setStatus(msg.text, msg.state, { log: msg.log !== false });
+    if (msg.jobId && msg.bridge !== false) {
       queueJobRequest(msg.jobId, function () {
         return postBridgeJson('/jobs/' + encodeURIComponent(msg.jobId) + '/progress', {
           text: msg.text || null,
@@ -153,7 +173,7 @@ window.onmessage = function (event) {
       return postBridgeJson('/jobs/' + encodeURIComponent(msg.jobId) + '/result', msg.data);
     })
     .then(function () {
-      setStatus('结果已发送 ✓', 'ok');
+      appendLog((msg.data && msg.data.error) ? '错误结果已发送' : '结果已发送');
       jobRequestQueues.delete(msg.jobId);
     })
     .catch(function (error) {

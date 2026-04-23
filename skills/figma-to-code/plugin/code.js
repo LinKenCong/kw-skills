@@ -1,5 +1,12 @@
 figma.showUI(__html__, { width: 340, height: 300 });
 var JOB_HEARTBEAT_INTERVAL_MS = 15000;
+var TRAVERSAL_YIELD_INTERVAL_MS = 250;
+var TRAVERSAL_STATUS_INTERVAL_MS = 1500;
+var SAFE_MODE_TOTAL_NODE_LIMIT = 2500;
+var SAFE_MODE_TEXT_NODE_LIMIT = 120;
+var SAFE_MODE_INSTANCE_NODE_LIMIT = 150;
+var SAFE_MODE_MAX_SERIALIZED_NODES = 3000;
+var SAFE_MODE_MAX_DEPTH = 16;
 
 // ══════════════════════════════════════════════
 // Utility
@@ -37,6 +44,43 @@ function safeRead(node, key) {
   catch (e) { return { value: null, error: e }; }
 }
 
+function safeArrayRead(node, key) {
+  var result = safeRead(node, key);
+  return Array.isArray(result.value) ? result.value : null;
+}
+
+function nextTick() {
+  return new Promise(function (resolve) {
+    setTimeout(resolve, 0);
+  });
+}
+
+function createTraversalProgress(jobId, label) {
+  return {
+    jobId: jobId || null,
+    label: label || '正在序列化节点树',
+    visited: 0,
+    lastYieldAt: Date.now(),
+    lastStatusAt: 0,
+  };
+}
+
+async function maybeYieldTraversal(progress) {
+  if (!progress) return;
+  progress.visited += 1;
+  var now = Date.now();
+  if (progress.jobId && now - progress.lastStatusAt >= TRAVERSAL_STATUS_INTERVAL_MS) {
+    progress.lastStatusAt = now;
+    postStatus(progress.jobId, progress.label + ' (' + progress.visited + ' nodes)...', 'working', {
+      bridge: false,
+      log: false,
+    });
+  }
+  if (now - progress.lastYieldAt < TRAVERSAL_YIELD_INTERVAL_MS) return;
+  progress.lastYieldAt = now;
+  await nextTick();
+}
+
 function sanitizeFileName(name) {
   var sanitized = String(name || 'untitled')
     .replace(/[^a-zA-Z0-9_-]+/g, '-')
@@ -47,6 +91,14 @@ function sanitizeFileName(name) {
 }
 
 function countKeys(obj) { return Object.keys(obj || {}).length; }
+
+function sumNodeTypeCounts(nodeTypes) {
+  var total = 0;
+  for (var key in (nodeTypes || {})) {
+    total += nodeTypes[key] || 0;
+  }
+  return total;
+}
 
 function postToUi(type, data) {
   var msg = { type: type };
@@ -59,11 +111,17 @@ function postToUi(type, data) {
   figma.ui.postMessage(msg);
 }
 
-function postStatus(jobId, text, state) {
+function postStatus(jobId, text, state, options) {
+  var shouldBridge = !(options && options.bridge === false);
+  var shouldLog = options && Object.prototype.hasOwnProperty.call(options, 'log')
+    ? options.log
+    : state !== 'working';
   postToUi('status', {
     jobId: jobId || null,
     text: text,
     state: state,
+    bridge: shouldBridge,
+    log: shouldLog,
   });
 }
 
@@ -184,8 +242,9 @@ function serializeSpacingValue(v) {
   return { unit: v.unit || null, value: roundNum(v.value) };
 }
 
-function serializeTextSegments(node) {
+function serializeTextSegments(node, extractionProfile) {
   if (!node || typeof node.getStyledTextSegments !== 'function') return [];
+  if (extractionProfile && extractionProfile.captureTextSegments === false) return [];
 
   var preferredFields = ['fontName', 'fontSize', 'fills', 'textStyleId', 'fillStyleId', 'lineHeight', 'letterSpacing', 'textDecoration', 'textCase', 'hyperlink'];
   var fallbackFields = ['fontName', 'fontSize', 'fills', 'lineHeight', 'letterSpacing'];
@@ -392,7 +451,7 @@ function mapStyle(node) {
 // Serialization: Text node
 // ══════════════════════════════════════════════
 
-function mapTextNode(node) {
+function mapTextNode(node, extractionProfile) {
   if (!node || node.type !== 'TEXT') return null;
   return {
     characters: typeof node.characters === 'string' ? node.characters : '',
@@ -405,7 +464,7 @@ function mapTextNode(node) {
     textAutoResize: safeStringProp(node.textAutoResize),
     textCase: safeStringProp(node.textCase),
     textDecoration: safeStringProp(node.textDecoration),
-    segments: serializeTextSegments(node),
+    segments: serializeTextSegments(node, extractionProfile),
   };
 }
 
@@ -413,19 +472,23 @@ function mapTextNode(node) {
 // Serialization: Vector
 // ══════════════════════════════════════════════
 
-function mapVector(node) {
+function mapVector(node, extractionProfile) {
+  if (extractionProfile && extractionProfile.captureVectorDetails === false) return null;
   var vector = {};
-  if (hasProperty(node, 'fillGeometry') && Array.isArray(node.fillGeometry)) {
-    vector.fillGeometryCount = node.fillGeometry.length;
-    if (node.fillGeometry.length > 0 && node.fillGeometry.length <= 8) vector.fillGeometry = node.fillGeometry;
+  var fillGeometry = safeArrayRead(node, 'fillGeometry');
+  if (fillGeometry) {
+    vector.fillGeometryCount = fillGeometry.length;
+    if (fillGeometry.length > 0 && fillGeometry.length <= 8) vector.fillGeometry = fillGeometry;
   }
-  if (hasProperty(node, 'strokeGeometry') && Array.isArray(node.strokeGeometry)) {
-    vector.strokeGeometryCount = node.strokeGeometry.length;
-    if (node.strokeGeometry.length > 0 && node.strokeGeometry.length <= 8) vector.strokeGeometry = node.strokeGeometry;
+  var strokeGeometry = safeArrayRead(node, 'strokeGeometry');
+  if (strokeGeometry) {
+    vector.strokeGeometryCount = strokeGeometry.length;
+    if (strokeGeometry.length > 0 && strokeGeometry.length <= 8) vector.strokeGeometry = strokeGeometry;
   }
-  if (hasProperty(node, 'vectorPaths') && Array.isArray(node.vectorPaths)) {
-    vector.vectorPathCount = node.vectorPaths.length;
-    if (node.vectorPaths.length > 0 && node.vectorPaths.length <= 8) vector.vectorPaths = node.vectorPaths;
+  var vectorPaths = safeArrayRead(node, 'vectorPaths');
+  if (vectorPaths) {
+    vector.vectorPathCount = vectorPaths.length;
+    if (vectorPaths.length > 0 && vectorPaths.length <= 8) vector.vectorPaths = vectorPaths;
   }
   return countKeys(vector) > 0 ? vector : null;
 }
@@ -434,7 +497,7 @@ function mapVector(node) {
 // Serialization: Component
 // ══════════════════════════════════════════════
 
-async function mapComponent(node) {
+async function mapComponent(node, extractionProfile) {
   var comp = {};
 
   var propsResult = safeRead(node, 'componentProperties');
@@ -452,7 +515,16 @@ async function mapComponent(node) {
   var variantResult = safeRead(node, 'variantProperties');
   if (variantResult.value) comp.variantProperties = variantResult.value;
 
-  if (node.type === 'INSTANCE' && typeof node.getMainComponentAsync === 'function') {
+  if (
+    extractionProfile &&
+    extractionProfile.resolveMainComponents === false &&
+    (!comp.properties || countKeys(comp.properties) === 0) &&
+    !comp.variantProperties
+  ) {
+    return null;
+  }
+
+  if (node.type === 'INSTANCE' && typeof node.getMainComponentAsync === 'function' && (!extractionProfile || extractionProfile.resolveMainComponents !== false)) {
     try {
       var main = await node.getMainComponentAsync();
       if (main) {
@@ -496,6 +568,78 @@ async function resolveVariableCache(nodes) {
     if (results[j]) variableCache[idArray[j]] = results[j];
   }
   return variableCache;
+}
+
+function analyzeExtractionComplexity(nodes) {
+  var stats = {
+    totalNodes: Array.isArray(nodes) ? nodes.length : 0,
+    textNodes: 0,
+    instanceNodes: 0,
+    vectorNodes: 0,
+  };
+
+  if (!Array.isArray(nodes)) return stats;
+
+  for (var i = 0; i < nodes.length; i++) {
+    var node = nodes[i];
+    if (!node || typeof node.type !== 'string') continue;
+    if (node.type === 'TEXT') stats.textNodes += 1;
+    if (node.type === 'INSTANCE') stats.instanceNodes += 1;
+    if (node.type === 'VECTOR' || node.type === 'BOOLEAN_OPERATION' || node.type === 'STAR' || node.type === 'LINE' || node.type === 'ELLIPSE' || node.type === 'POLYGON') {
+      stats.vectorNodes += 1;
+    }
+  }
+
+  return stats;
+}
+
+function buildExtractionProfile(stats) {
+  var safeMode = !!(
+    stats.totalNodes > SAFE_MODE_TOTAL_NODE_LIMIT ||
+    stats.textNodes > SAFE_MODE_TEXT_NODE_LIMIT ||
+    stats.instanceNodes > SAFE_MODE_INSTANCE_NODE_LIMIT
+  );
+
+  return {
+    mode: safeMode ? 'safe' : 'standard',
+    stats: stats,
+    resolveVariables: !safeMode,
+    captureTextSegments: !safeMode,
+    resolveMainComponents: !safeMode,
+    captureVectorDetails: !safeMode,
+    maxSerializedNodes: safeMode ? SAFE_MODE_MAX_SERIALIZED_NODES : Number.POSITIVE_INFINITY,
+    maxDepth: safeMode ? SAFE_MODE_MAX_DEPTH : 50,
+    serializedNodes: 0,
+    truncatedNodes: 0,
+  };
+}
+
+function scanSubtreeStatsFromRoots(roots) {
+  var stats = {
+    totalNodes: 0,
+    textNodes: 0,
+    instanceNodes: 0,
+    vectorNodes: 0,
+  };
+  var stack = (roots || []).slice();
+
+  while (stack.length > 0) {
+    var node = stack.pop();
+    if (!node || typeof node.type !== 'string') continue;
+    stats.totalNodes += 1;
+    if (node.type === 'TEXT') stats.textNodes += 1;
+    if (node.type === 'INSTANCE') stats.instanceNodes += 1;
+    if (node.type === 'VECTOR' || node.type === 'BOOLEAN_OPERATION' || node.type === 'STAR' || node.type === 'LINE' || node.type === 'ELLIPSE' || node.type === 'POLYGON') {
+      stats.vectorNodes += 1;
+    }
+    if (node.children && Array.isArray(node.children)) {
+      for (var i = node.children.length - 1; i >= 0; i--) {
+        stack.push(node.children[i]);
+      }
+    }
+  }
+
+  return stats;
 }
 
 async function buildVariablesDefs(variableCache) {
@@ -633,8 +777,24 @@ function collectResourcesFromNodes(nodes) {
 // Node tree serialization
 // ══════════════════════════════════════════════
 
-async function serializeNode(node, variableCache, resourceCollector, depth) {
+async function serializeNode(node, variableCache, resourceCollector, depth, traversalProgress, extractionProfile) {
   if (!node) return null;
+
+  await maybeYieldTraversal(traversalProgress);
+  if (extractionProfile) {
+    if (depth > extractionProfile.maxDepth || extractionProfile.serializedNodes >= extractionProfile.maxSerializedNodes) {
+      extractionProfile.truncatedNodes += 1;
+      return {
+        id: node.id,
+        name: typeof node.name === 'string' ? node.name : '',
+        type: node.type,
+        visible: node.visible !== false,
+        truncated: true,
+        childCount: node.children && Array.isArray(node.children) ? node.children.length : 0,
+      };
+    }
+    extractionProfile.serializedNodes += 1;
+  }
 
   registerResources(resourceCollector, node);
 
@@ -649,26 +809,29 @@ async function serializeNode(node, variableCache, resourceCollector, depth) {
   result.style = mapStyle(node);
 
   if (node.type === 'TEXT') {
-    result.text = mapTextNode(node);
+    result.text = mapTextNode(node, extractionProfile);
   }
 
-  var vectorInfo = mapVector(node);
+  var vectorInfo = mapVector(node, extractionProfile);
   if (vectorInfo) result.vector = vectorInfo;
 
-  var componentInfo = await mapComponent(node);
+  var componentInfo = await mapComponent(node, extractionProfile);
   if (componentInfo) result.component = componentInfo;
 
   // Variable bindings
-  var boundResult = safeRead(node, 'boundVariables');
-  if (boundResult.value) result.boundVariables = serializeVariableBinding(boundResult.value, variableCache);
-  var inferredResult = safeRead(node, 'inferredVariables');
-  if (inferredResult.value) result.inferredVariables = serializeVariableBinding(inferredResult.value, variableCache);
+  if (!extractionProfile || extractionProfile.resolveVariables !== false) {
+    var boundResult = safeRead(node, 'boundVariables');
+    if (boundResult.value) result.boundVariables = serializeVariableBinding(boundResult.value, variableCache);
+    var inferredResult = safeRead(node, 'inferredVariables');
+    if (inferredResult.value) result.inferredVariables = serializeVariableBinding(inferredResult.value, variableCache);
+  }
 
   // Children
-  if (node.children && Array.isArray(node.children) && depth < 50) {
+  var maxDepth = extractionProfile ? extractionProfile.maxDepth : 50;
+  if (node.children && Array.isArray(node.children) && depth < maxDepth) {
     result.children = [];
     for (var i = 0; i < node.children.length; i++) {
-      var child = await serializeNode(node.children[i], variableCache, resourceCollector, depth + 1);
+      var child = await serializeNode(node.children[i], variableCache, resourceCollector, depth + 1, traversalProgress, extractionProfile);
       if (child) result.children.push(child);
     }
   }
@@ -772,15 +935,21 @@ function computeUnionBoundingBox(nodes) {
 async function extractNode(node, fileKey, jobId) {
   postStatus(jobId, '正在提取 ' + node.name + '...', 'working');
 
-  var allNodes = collectSubtreeNodes(node);
-  var variableCache = await resolveVariableCache(allNodes);
+  var extractionProfile = buildExtractionProfile(scanSubtreeStatsFromRoots([node]));
+  postStatus(jobId, '正在解析变量绑定...', 'working');
+  var allNodes = extractionProfile.resolveVariables !== false ? collectSubtreeNodes(node) : [];
+  var variableCache = extractionProfile.resolveVariables !== false ? await resolveVariableCache(allNodes) : {};
   var resourceCollector = createResourceCollector();
   var resources;
+  var traversalProgress = createTraversalProgress(jobId, '正在序列化节点树');
 
-  var root = await serializeNode(node, variableCache, resourceCollector, 0);
+  postStatus(jobId, '正在序列化节点树...', 'working');
+  var root = await serializeNode(node, variableCache, resourceCollector, 0, traversalProgress, extractionProfile);
+  postStatus(jobId, '正在整理变量定义...', 'working');
   var variables = await buildVariablesDefs(variableCache);
   var page = findPage(node);
   resources = finalizeResourceCollector(resourceCollector);
+  var serializedNodeCount = sumNodeTypeCounts(resources.nodeTypes);
 
   return {
     version: 2,
@@ -791,6 +960,13 @@ async function extractNode(node, fileKey, jobId) {
       nodeType: node.type,
       pageId: page ? page.id : null,
       pageName: page ? page.name : null,
+      extractionProfile: {
+        mode: extractionProfile.mode,
+        stats: extractionProfile.stats,
+        serializedNodes: extractionProfile.serializedNodes,
+        truncatedNodes: extractionProfile.truncatedNodes,
+      },
+      serializedNodeCount: serializedNodeCount,
       extractedAt: new Date().toISOString(),
     },
     root: root,
@@ -804,19 +980,24 @@ async function extractNode(node, fileKey, jobId) {
 async function extractMultipleNodes(nodes, jobId) {
   postStatus(jobId, '正在提取 ' + nodes.length + ' 个选中节点...', 'working');
 
+  var extractionProfile = buildExtractionProfile(scanSubtreeStatsFromRoots(nodes));
+  postStatus(jobId, '正在解析变量绑定...', 'working');
   var allSubtreeNodes = [];
-  for (var i = 0; i < nodes.length; i++) {
-    var subtree = collectSubtreeNodes(nodes[i]);
-    for (var j = 0; j < subtree.length; j++) allSubtreeNodes.push(subtree[j]);
+  if (extractionProfile.resolveVariables !== false) {
+    for (var i = 0; i < nodes.length; i++) {
+      var subtree = collectSubtreeNodes(nodes[i]);
+      for (var j = 0; j < subtree.length; j++) allSubtreeNodes.push(subtree[j]);
+    }
   }
-
-  var variableCache = await resolveVariableCache(allSubtreeNodes);
+  var variableCache = extractionProfile.resolveVariables !== false ? await resolveVariableCache(allSubtreeNodes) : {};
   var resourceCollector = createResourceCollector();
   var resources;
+  var traversalProgress = createTraversalProgress(jobId, '正在序列化选区节点');
 
   var serializedChildren = [];
   for (var k = 0; k < nodes.length; k++) {
-    var child = await serializeNode(nodes[k], variableCache, resourceCollector, 0);
+    postStatus(jobId, '正在序列化选区节点 (' + (k + 1) + '/' + nodes.length + ')...', 'working');
+    var child = await serializeNode(nodes[k], variableCache, resourceCollector, 0, traversalProgress, extractionProfile);
     if (child) serializedChildren.push(child);
   }
 
@@ -850,11 +1031,13 @@ async function extractMultipleNodes(nodes, jobId) {
     children: serializedChildren
   };
 
+  postStatus(jobId, '正在整理变量定义...', 'working');
   var variables = await buildVariablesDefs(variableCache);
   var page = findPage(nodes[0]);
   var selectedNodeIds = [];
   for (var n = 0; n < nodes.length; n++) selectedNodeIds.push(nodes[n].id);
   resources = finalizeResourceCollector(resourceCollector);
+  var serializedNodeCount = sumNodeTypeCounts(resources.nodeTypes) + 1;
 
   return {
     version: 2,
@@ -868,6 +1051,13 @@ async function extractMultipleNodes(nodes, jobId) {
       selectedNodeCount: nodes.length,
       pageId: page ? page.id : null,
       pageName: page ? page.name : null,
+      extractionProfile: {
+        mode: extractionProfile.mode,
+        stats: extractionProfile.stats,
+        serializedNodes: extractionProfile.serializedNodes,
+        truncatedNodes: extractionProfile.truncatedNodes,
+      },
+      serializedNodeCount: serializedNodeCount,
       extractedAt: new Date().toISOString(),
     },
     root: virtualRoot,
@@ -982,6 +1172,9 @@ async function captureCssHints(node) {
 function buildPageInfo(page, extraction, sourceMode, selectedNodes, pageBounds) {
   var selectedNodeIds = [];
   for (var i = 0; i < selectedNodes.length; i++) selectedNodeIds.push(selectedNodes[i].id);
+  var nodeCount = extraction && extraction.meta && typeof extraction.meta.serializedNodeCount === 'number'
+    ? extraction.meta.serializedNodeCount
+    : countSerializedNodes(extraction.root);
   return {
     pageId: page ? page.id : null,
     pageName: page ? page.name : null,
@@ -991,7 +1184,7 @@ function buildPageInfo(page, extraction, sourceMode, selectedNodes, pageBounds) 
     rootNodeType: extraction.meta.nodeType,
     selectionCount: selectedNodes.length,
     selectedNodeIds: selectedNodeIds,
-    nodeCount: countSerializedNodes(extraction.root),
+    nodeCount: nodeCount,
     pageBounds: pageBounds,
     stats: {
       textNodeCount: countPageNodesByTypes(page, ['TEXT']),
@@ -1451,9 +1644,19 @@ function listAllPages() {
   var pages = [];
   if (!figma.root || !figma.root.children) return pages;
   for (var i = 0; i < figma.root.children.length; i++) {
-    if (figma.root.children[i] && figma.root.children[i].type === 'PAGE') pages.push(figma.root.children[i]);
+    if (figma.root.children[i] && figma.root.children[i].type === 'PAGE') {
+      pages.push(resolvePageReference(figma.root.children[i]));
+    }
   }
   return pages;
+}
+
+function resolvePageReference(page) {
+  if (!page) return page;
+  if (figma.currentPage && page.id === figma.currentPage.id) {
+    return figma.currentPage;
+  }
+  return page;
 }
 
 function findPagesByIdentifiers(identifiers) {
@@ -1480,9 +1683,13 @@ function getPagesWithSelection() {
 }
 
 async function ensurePageLoaded(page) {
-  if (!page || typeof page.loadAsync !== 'function') return page;
-  await page.loadAsync();
-  return page;
+  var resolvedPage = resolvePageReference(page);
+  if (!resolvedPage || typeof resolvedPage.loadAsync !== 'function') return resolvedPage;
+  if (figma.currentPage && resolvedPage.id === figma.currentPage.id) {
+    return figma.currentPage;
+  }
+  await resolvedPage.loadAsync();
+  return resolvedPage;
 }
 
 async function withOptimizedTraversal(fn) {
@@ -1509,8 +1716,8 @@ async function withJobHeartbeat(jobId, heartbeatText, fn) {
 }
 
 function handleError(jobId, error) {
-  postToUi('post-result', { jobId: jobId, data: { error: error.message || String(error) } });
   postStatus(jobId, '执行失败: ' + (error.message || String(error)), 'error');
+  postToUi('post-result', { jobId: jobId, data: { error: error.message || String(error) } });
 }
 
 async function executeExtractJob(jobId, target, options) {
@@ -1536,8 +1743,8 @@ async function executeExtractJob(jobId, target, options) {
         extraction = attachLegacyMetadata(extraction, page, [node], options, 'node');
         await exportLegacyArtifacts(jobId, [node], page, extraction, options);
 
-        postToUi('post-result', { jobId: jobId, data: extraction });
         postStatus(jobId, '提取完成 ✓ (' + countKeys(extraction.resources.nodeTypes) + ' 种节点)', 'ok');
+        postToUi('post-result', { jobId: jobId, data: extraction });
       });
     });
   } catch (error) {
@@ -1568,8 +1775,8 @@ async function executeExtractSelectionJob(jobId, options) {
         extraction = attachLegacyMetadata(extraction, figma.currentPage, selection.slice(), options, sourceMode);
         await exportLegacyArtifacts(jobId, selection.slice(), figma.currentPage, extraction, options);
 
-        postToUi('post-result', { jobId: jobId, data: extraction });
         postStatus(jobId, '选区提取完成 ✓ (' + selection.length + ' 个节点)', 'ok');
+        postToUi('post-result', { jobId: jobId, data: extraction });
       });
     });
   } catch (error) {
@@ -1609,8 +1816,8 @@ async function executeExtractPagesJob(jobId, target, options) {
           pages: entries,
         };
 
-        postToUi('post-result', { jobId: jobId, data: bundle });
         postStatus(jobId, '页面 bundle 提取完成 ✓ (' + pages.length + ' 页)', 'ok');
+        postToUi('post-result', { jobId: jobId, data: bundle });
       });
     });
   } catch (error) {
@@ -1656,8 +1863,8 @@ async function executeExtractSelectedPagesBundleJob(jobId, options) {
           pages: entries,
         };
 
-        postToUi('post-result', { jobId: jobId, data: bundle });
         postStatus(jobId, '多页面 selection bundle 提取完成 ✓ (' + pages.length + ' 页)', 'ok');
+        postToUi('post-result', { jobId: jobId, data: bundle });
       });
     });
   } catch (error) {

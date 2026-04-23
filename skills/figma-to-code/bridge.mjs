@@ -578,6 +578,13 @@ async function handleExtractPages(request, response) {
     sendJson(response, 400, { ok: false, error: 'missing pages array' });
     return;
   }
+  if (body.options?.allowFullPage !== true) {
+    sendJson(response, 400, {
+      ok: false,
+      error: 'extract-pages requires explicit allowFullPage=true. Use selection-based extraction by default.',
+    });
+    return;
+  }
   await dispatchJob(response, 'extract-pages', { pages: body.pages }, body.options || {}, body.context || {});
 }
 
