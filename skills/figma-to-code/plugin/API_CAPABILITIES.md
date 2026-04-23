@@ -89,6 +89,7 @@ Official APIs used:
 Notes:
 - `--screenshot` preserves legacy `screenshot.png` compatibility
 - `--node-screenshots` writes direct exports to node-scoped directories instead of crop-derived screenshots
+- node-scoped packages keep root SVG/PNG exports and image-fill assets; descendant vector fragment exports are intentionally disabled by default
 
 ### 4. `extract.pages`
 Purpose:

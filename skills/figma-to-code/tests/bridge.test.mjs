@@ -29,11 +29,11 @@ test('writeBase64ToRelativePath allows node-scoped nested relative paths inside 
   const cacheDir = makeTempDir('figma-to-code-bridge-node-');
   const filePath = writeBase64ToRelativePath(
     cacheDir,
-    'nodes/12-34/assets/vectors/icon.svg',
+    'nodes/12-34/exports/icon.svg',
     Buffer.from('<svg></svg>').toString('base64')
   );
 
-  assert.equal(filePath, path.join(cacheDir, 'nodes', '12-34', 'assets', 'vectors', 'icon.svg'));
+  assert.equal(filePath, path.join(cacheDir, 'nodes', '12-34', 'exports', 'icon.svg'));
   assert.equal(fs.existsSync(filePath), true);
   assert.equal(fs.readFileSync(filePath, 'utf8'), '<svg></svg>');
 });

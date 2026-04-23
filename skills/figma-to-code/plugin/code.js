@@ -1339,57 +1339,6 @@ async function exportImageFills(jobId, rootNodeId, assetRecords, imageRefs, asse
   }
 }
 
-var MAX_VECTOR_EXPORTS = 50;
-
-async function exportVectorNodes(jobId, rootNodeId, node, assetRecords, assetContext) {
-  var vectors = [];
-  var vectorTypes = { VECTOR: 1, BOOLEAN_OPERATION: 1, STAR: 1, LINE: 1, ELLIPSE: 1, POLYGON: 1 };
-
-  function collectVectors(n, isRoot) {
-    if (!n) return;
-    if (!isRoot && vectorTypes[n.type]) {
-      vectors.push(n);
-    }
-    if ('children' in n && vectors.length < MAX_VECTOR_EXPORTS) {
-      for (var i = 0; i < n.children.length; i++) {
-        collectVectors(n.children[i], false);
-        if (vectors.length >= MAX_VECTOR_EXPORTS) break;
-      }
-    }
-  }
-
-  collectVectors(node, true);
-  if (vectors.length === 0) return;
-
-  postStatus(jobId, '正在导出矢量资源 (' + vectors.length + (vectors.length >= MAX_VECTOR_EXPORTS ? '+' : '') + ')...', 'working');
-  if (!assetRecords.vectors) assetRecords.vectors = [];
-  var vectorDir = assetContext.vectorDir || assetContext.assetDir || null;
-
-  for (var i = 0; i < vectors.length; i++) {
-    var vec = vectors[i];
-    try {
-      var vectorAssets = await exportNodeAssets(vec, ['SVG', 'PNG'], rootNodeId);
-      var vectorBaseName = sanitizeFileName(vec.name || 'vector') + '--' + sanitizeIdForPath(vec.id);
-      for (var j = 0; j < vectorAssets.length; j++) {
-        vectorAssets[j].fileName = vectorBaseName + (vectorAssets[j].format === 'SVG' ? '.svg' : '@2x.png');
-        var relativePath = vectorDir ? vectorDir + '/' + vectorAssets[j].fileName : null;
-        if (relativePath) vectorAssets[j].relativePath = relativePath;
-        if (assetContext.bundleId) vectorAssets[j].bundleId = assetContext.bundleId;
-        if (assetContext.pageId) vectorAssets[j].pageId = assetContext.pageId;
-        if (assetContext.pageName) vectorAssets[j].pageName = assetContext.pageName;
-        postAsset(jobId, vectorAssets[j]);
-        assetRecords.vectors.push({
-          nodeId: vec.id,
-          name: vec.name,
-          format: vectorAssets[j].format,
-          fileName: vectorAssets[j].fileName,
-          relativePath: relativePath || null
-        });
-      }
-    } catch (_) { /* vector export may fail */ }
-  }
-}
-
 async function exportNodeAssetFiles(jobId, nodes, rootNodeId, assetRecords, options, assetContext) {
   var exportNodes = makeUniqueNodes(nodes || []);
   if (exportNodes.length === 0) return;
@@ -1415,9 +1364,8 @@ async function exportNodeAssetFiles(jobId, nodes, rootNodeId, assetRecords, opti
 
   if (options.exportAssets) {
     await exportImageFills(jobId, rootNodeId, assetRecords, assetContext.imageRefs || null, assetContext);
-    for (var k = 0; k < exportNodes.length; k++) {
-      await exportVectorNodes(jobId, rootNodeId, exportNodes[k], assetRecords, assetContext);
-    }
+    // Descendant vector fragments are intentionally not exported by default.
+    // Root node SVG/PNG exports remain the primary vector evidence for downstream work.
   }
 }
 
@@ -1507,7 +1455,6 @@ async function exportNodePackages(jobId, nodes, rootNodeId, extraction, options,
       pageName: assetContext.pageName || null,
       exportDir: relativeDir + '/exports',
       imageDir: relativeDir + '/assets/images',
-      vectorDir: relativeDir + '/assets/vectors',
       imageRefs: nodeResources.imageRefs,
     });
 

@@ -189,7 +189,8 @@ Use region-first diagnosis instead of whole-page eyeballing whenever possible.
 ### Page screenshots and node artifacts
 - page screenshots are first-class bundle artifacts
 - node screenshots are direct exports stored inside node-scoped directories
-- node-scoped exports also include SVG/PNG root exports plus nested image/vector assets when available
+- node-scoped exports include SVG/PNG root exports plus image-fill assets when available
+- descendant vector fragments are intentionally not exported by default; prefer node-level SVG/PNG exports and screenshots
 
 ### Multi-page selections
 - official `PageNode.selection` persistence makes selected-pages bundle extraction possible

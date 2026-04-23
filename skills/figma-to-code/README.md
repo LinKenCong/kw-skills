@@ -209,9 +209,11 @@ The most valuable outputs for restoration work are now:
 - bundle page list
 - page screenshots
 - direct per-node screenshots
-- node-scoped SVG/PNG exports and nested assets
+- node-scoped SVG/PNG exports and image-fill assets
 - level 1 / level 2 regions
 - component / variable / CSS hints
+
+Descendant vector fragment exports are intentionally disabled by default. For AI-facing workflows, the primary visual evidence should be the node-level `exports/*.svg`, `exports/*@2x.png`, and screenshot artifacts rather than dozens of tiny vector leaf files.
 
 These exist to support baseline-first and evidence-first workflows, not just one-shot code generation.
 
