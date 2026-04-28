@@ -1,0 +1,14 @@
+{
+  "name": "Figma React Restore",
+  "id": "figma-react-restore-dev",
+  "api": "1.0.0",
+  "main": "code.js",
+  "ui": "ui.html",
+  "editorType": ["figma"],
+  "documentAccess": "dynamic-page",
+  "networkAccess": {
+    "allowedDomains": ["http://localhost:39217", "http://127.0.0.1:39217"],
+    "devAllowedDomains": ["http://localhost:39217", "http://127.0.0.1:39217"],
+    "reasoning": "Communicates with the local figma-react-restore runtime service."
+  }
+}

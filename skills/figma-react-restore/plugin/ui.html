@@ -1,0 +1,165 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    :root { font: 12px/1.45 ui-sans-serif, system-ui, sans-serif; color: var(--figma-color-text); background: var(--figma-color-bg); }
+    body { margin: 0; padding: 16px; }
+    h1 { font-size: 15px; margin: 0 0 12px; }
+    label { display: block; margin: 10px 0 4px; color: var(--figma-color-text-secondary); }
+    input { box-sizing: border-box; width: 100%; padding: 8px; border: 1px solid var(--figma-color-border); border-radius: 6px; background: var(--figma-color-bg-secondary); color: var(--figma-color-text); }
+    button { margin-top: 10px; width: 100%; padding: 8px 10px; border: 0; border-radius: 6px; background: var(--figma-color-bg-brand); color: var(--figma-color-text-onbrand); font-weight: 600; cursor: pointer; }
+    button.secondary { background: var(--figma-color-bg-secondary); color: var(--figma-color-text); border: 1px solid var(--figma-color-border); }
+    pre { height: 205px; overflow: auto; padding: 10px; border-radius: 6px; background: var(--figma-color-bg-secondary); white-space: pre-wrap; }
+    .row { display: flex; gap: 8px; }
+    .row button { flex: 1; }
+    .status { margin: 8px 0; color: var(--figma-color-text-secondary); }
+  </style>
+</head>
+<body>
+  <h1>Figma React Restore</h1>
+  <label>Runtime URL</label>
+  <input id="serviceUrl" value="http://127.0.0.1:39217" />
+  <label>Runtime token</label>
+  <input id="token" placeholder="Paste token from figma-react-restore service start" />
+  <div class="row">
+    <button id="register">Register</button>
+    <button id="connect" class="secondary">Connect Events</button>
+  </div>
+  <button id="refresh" class="secondary">Refresh Session Info</button>
+  <div id="status" class="status">Not registered</div>
+  <pre id="log"></pre>
+<script>
+const state = {
+  pluginSessionId: localStorage.getItem('frr.sessionId') || `ps_${Date.now().toString(36)}_${Math.random().toString(16).slice(2)}`,
+  serviceUrl: localStorage.getItem('frr.serviceUrl') || 'http://127.0.0.1:39217',
+  token: localStorage.getItem('frr.token') || '',
+  session: null,
+  events: null,
+};
+localStorage.setItem('frr.sessionId', state.pluginSessionId);
+const serviceUrlInput = document.getElementById('serviceUrl');
+const tokenInput = document.getElementById('token');
+const statusEl = document.getElementById('status');
+const logEl = document.getElementById('log');
+serviceUrlInput.value = state.serviceUrl;
+tokenInput.value = state.token;
+
+document.getElementById('register').onclick = () => register().catch(showError);
+document.getElementById('connect').onclick = () => connectEvents().catch(showError);
+document.getElementById('refresh').onclick = () => parent.postMessage({ pluginMessage: { type: 'get-session' } }, '*');
+parent.postMessage({ pluginMessage: { type: 'get-session' } }, '*');
+
+window.onmessage = async (event) => {
+  const message = event.data.pluginMessage;
+  if (!message) return;
+  if (message.type === 'session-info') {
+    state.session = message.session;
+    statusEl.textContent = `Session ${state.pluginSessionId}; selection=${message.session.selectionCount}`;
+    log(`Session info: ${JSON.stringify(message.session)}`);
+    return;
+  }
+  if (message.type === 'progress') {
+    await postJson(`/jobs/${message.jobId}/progress`, message.progress).catch(showError);
+    log(`Progress ${message.jobId}: ${message.progress.stage}`);
+    return;
+  }
+  if (message.type === 'extract-error') {
+    await postJson(`/jobs/${message.jobId}/result`, { ok: false, error: message.error }).catch(showError);
+    log(`Extraction failed: ${message.error.message}`);
+    return;
+  }
+  if (message.type === 'extraction-ready') {
+    await finishExtraction(message).catch(showError);
+  }
+};
+
+async function register() {
+  saveInputs();
+  if (!state.session) parent.postMessage({ pluginMessage: { type: 'get-session' } }, '*');
+  await sleep(120);
+  const session = state.session || { fileName: 'Unknown', currentPageId: '', currentPageName: '', selectionCount: 0, capabilities: ['extract.selection'] };
+  const payload = { pluginSessionId: state.pluginSessionId, ...session };
+  const data = await postJson('/sessions/register', payload);
+  statusEl.textContent = `Registered ${data.session.pluginSessionId}; selection=${data.session.selectionCount}`;
+  log('Registered runtime session');
+}
+
+async function connectEvents() {
+  saveInputs();
+  if (state.events) state.events.close();
+  const url = `${state.serviceUrl.replace(/\/$/, '')}/events?sessionId=${encodeURIComponent(state.pluginSessionId)}&token=${encodeURIComponent(state.token)}`;
+  state.events = new EventSource(url);
+  state.events.addEventListener('ready', () => log('Event stream ready'));
+  state.events.addEventListener('job.created', (event) => {
+    const data = JSON.parse(event.data);
+    log(`Job received: ${data.job.jobId} ${data.job.capability}`);
+    if (data.job.capability === 'extract.selection') {
+      parent.postMessage({ pluginMessage: { type: 'extract-selection', job: data.job } }, '*');
+    }
+  });
+  state.events.addEventListener('job.canceled', (event) => log(`Job canceled: ${event.data}`));
+  state.events.onerror = () => log('Event stream error; check token and service URL');
+}
+
+async function finishExtraction(message) {
+  for (const artifact of message.artifacts) {
+    const dataBase64 = bytesToBase64(artifact.bytes);
+    await postJson(`/jobs/${message.jobId}/artifacts`, {
+      artifactId: artifact.artifactId,
+      kind: artifact.kind,
+      fileName: artifact.fileName,
+      mediaType: artifact.mediaType,
+      sourceNodeId: artifact.sourceNodeId,
+      dataBase64,
+    });
+    log(`Uploaded artifact ${artifact.artifactId}`);
+  }
+  await postJson(`/jobs/${message.jobId}/result`, { ok: true, result: message.extraction });
+  log(`Extraction completed for job ${message.jobId}`);
+}
+
+async function postJson(endpoint, body) {
+  saveInputs();
+  const response = await fetch(`${state.serviceUrl.replace(/\/$/, '')}${endpoint}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${state.token}` },
+    body: JSON.stringify(body),
+  });
+  const data = await response.json();
+  if (!response.ok || data.ok === false) throw new Error(data.error ? data.error.message : `HTTP ${response.status}`);
+  return data;
+}
+
+function saveInputs() {
+  state.serviceUrl = serviceUrlInput.value.trim() || 'http://127.0.0.1:39217';
+  state.token = tokenInput.value.trim();
+  localStorage.setItem('frr.serviceUrl', state.serviceUrl);
+  localStorage.setItem('frr.token', state.token);
+}
+
+function bytesToBase64(bytes) {
+  const array = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < array.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(null, array.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function log(message) {
+  const line = `[${new Date().toLocaleTimeString()}] ${message}`;
+  logEl.textContent = `${line}\n${logEl.textContent}`.slice(0, 6000);
+}
+
+function showError(error) {
+  log(`ERROR: ${error.message || error}`);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+</script>
+</body>
+</html>

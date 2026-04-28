@@ -1,0 +1,4 @@
+node_modules/
+.figma-react-restore/
+*.log
+dist/
