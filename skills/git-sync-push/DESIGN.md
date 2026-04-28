@@ -38,6 +38,7 @@ Out of scope:
 - Reduce model error surface from quoting, variable lifetime, and ad hoc condition handling.
 - Minimize user interruptions.
 - Ask for elevation only for commands that are expected to write `.git` state or require network access.
+- Use `rtk` only as an optional output filter for read-only Git sections when it is installed, so token savings do not affect workflow decisions.
 
 ## Workflow
 
@@ -73,6 +74,13 @@ All scripts follow two output conventions:
 
 This keeps the model in an interpretation role instead of a command-construction role. Command stderr should remain inside delimited sections instead of leaking into the outer protocol.
 
+Scripts that expose read-only Git sections also emit:
+
+- `RTK_AVAILABLE=true|false`
+- `TOKEN_FILTER=rtk|raw`
+
+When `TOKEN_FILTER=rtk`, those rich data blocks may come from `rtk git ...`. All branch gates, dirty checks, push decisions, and state-changing commands still use native `git`. Set `GIT_SYNC_PUSH_RTK=0` to force raw Git output for diagnostics or when compact diff output is not detailed enough.
+
 ### `scripts/preflight.sh`
 
 Responsibility:
@@ -82,6 +90,7 @@ Responsibility:
 - detect default branch
 - detect origin remote
 - report worktree state
+- compact the displayed porcelain status with `rtk` when available
 
 This script is read-only and should run without elevation.
 If the default branch cannot be determined safely from local metadata, it must return `RESULT=default_branch_unknown` instead of guessing.
@@ -128,6 +137,7 @@ Responsibility:
 - compute whether force-with-lease would be required when the remote tracking ref is reliable
 - emit the exact shell-escaped push command only when that decision is reliable
 - emit diff stat and worktree cleanliness
+- compact displayed log, diff stat, and status sections with `rtk` when available
 
 If the current branch does not have a reliable fresh `origin/<branch>` signal from the latest sync, it must report uncertainty rather than claiming `NEEDS_FORCE=false`. A first-push case with a fresh, explicit `missing` result is not uncertain and may emit the normal push command directly.
 
@@ -140,7 +150,7 @@ Responsibility:
 - emit the raw commit list against the default branch
 - emit diff stat
 - emit changed files
-- emit full diff when deeper summarization is needed
+- emit compacted diff through `rtk` when available, with raw Git fallback
 
 This script is read-only and exists only to support text drafting. It must remain scoped to text output and must not reintroduce PR creation or submission behavior.
 
@@ -156,6 +166,8 @@ These operations should request elevation up front:
 - `git push`
 
 The skill should not intentionally probe these operations inside the sandbox first if the environment is already known to reject them.
+
+Even when `rtk` is installed, the state-changing operations above stay on native Git. `rtk` can filter output, but this workflow needs exact failure semantics and unfiltered push/rebase/stash diagnostics for safe recovery.
 
 ## Conflict Policy
 
@@ -203,8 +215,15 @@ Those are separate workflows and should remain outside this skill.
 - Put deterministic workflow logic in `scripts/`.
 - Prefer extending script result codes over embedding more branch logic in prose.
 - If a future environment changes sandbox behavior, adjust the permission strategy section first.
+- If `rtk` behavior changes, constrain updates to display-only sections unless its exit semantics and stderr handling are proven compatible with the safety gates.
 
 ## Changelog
+
+### 2026-04 — Optional rtk output filtering
+
+- **Token optimization**: Added automatic `rtk` detection in shared script helpers.
+- **Safety**: Limited `rtk` usage to read-only, display-oriented Git sections; push/rebase/stash/fetch and branch gate decisions remain native Git.
+- **Diagnostics**: Scripts now emit `RTK_AVAILABLE` and `TOKEN_FILTER`, and `GIT_SYNC_PUSH_RTK=0` forces raw Git output.
 
 ### 2025-06 — Robustness & correctness pass
 

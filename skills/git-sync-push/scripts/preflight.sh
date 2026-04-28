@@ -25,10 +25,12 @@ echo "CURRENT_BRANCH=$current_branch"
 echo "DEFAULT_BRANCH=$default_branch"
 echo "HAS_ORIGIN=true"
 echo "REMOTE_URL=$remote_url"
+echo "RTK_AVAILABLE=$(rtk_installed && echo true || echo false)"
+echo "TOKEN_FILTER=$(git_output_filter)"
 echo "IS_SHALLOW=$(git rev-parse --is-shallow-repository 2>/dev/null || echo false)"
 echo "WORKTREE_DIRTY=$worktree_dirty"
 echo "BRANCH_IS_DEFAULT=$branch_is_default"
 echo "REBASE_IN_PROGRESS=$(has_rebase_in_progress && echo true || echo false)"
 echo "HEAD=$(git rev-parse HEAD)"
 
-print_section STATUS sh -c 'git status --porcelain'
+print_section STATUS compact_git status --porcelain

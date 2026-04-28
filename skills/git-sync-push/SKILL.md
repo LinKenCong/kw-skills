@@ -42,6 +42,18 @@ In this environment, `git fetch`, `git rebase`, `git stash`, and `git push` may 
 - For `git push`, request escalation up front.
 - Do not intentionally "try once and fail" for these write/network operations.
 
+## Optional rtk Token Filter
+
+The bundled scripts automatically detect `rtk` with `command -v rtk`. When available, they prefer `rtk git ...` only for read-only, token-heavy sections that are shown to the model, such as status, log, diff stat, and optional branch-summary diff output.
+
+Keep all gate decisions and state-changing commands on native `git`:
+
+- Do not use `rtk` for `git stash`, `git fetch`, `git rebase`, or `git push`.
+- Do not use `rtk` to decide whether a branch can be pushed or whether force-with-lease is required.
+- If compact output hides detail needed for PR text, rerun the relevant read-only script with `GIT_SYNC_PUSH_RTK=0`.
+
+Scripts emit `RTK_AVAILABLE=true|false` and `TOKEN_FILTER=rtk|raw` so the active mode is visible.
+
 ## Bundled Scripts
 
 Open these only when needed:
@@ -61,6 +73,8 @@ bash /path/to/git-sync-push/scripts/preflight.sh
 ```
 
 The script prints stable `KEY=VALUE` lines plus base64-encoded delimited sections. Each section also emits `<NAME>_ENCODING=base64` before the payload.
+
+If `TOKEN_FILTER=rtk`, section payloads may contain compact `rtk git` output rather than raw Git output. Gate fields such as `RESULT`, `CURRENT_BRANCH`, `DEFAULT_BRANCH`, `WORKTREE_DIRTY`, and `BRANCH_IS_DEFAULT` still come from native Git checks.
 
 Gate checks:
 
@@ -155,6 +169,12 @@ Run:
 
 ```bash
 bash /path/to/git-sync-push/scripts/branch_summary.sh
+```
+
+If the compact diff is too sparse for useful PR text, rerun:
+
+```bash
+GIT_SYNC_PUSH_RTK=0 bash /path/to/git-sync-push/scripts/branch_summary.sh
 ```
 
 Then return only:

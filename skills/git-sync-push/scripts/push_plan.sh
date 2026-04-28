@@ -63,6 +63,8 @@ echo "RESULT=$result"
 echo "CURRENT_BRANCH=$current_branch"
 echo "DEFAULT_BRANCH=$default_branch"
 echo "REMOTE_URL=$remote_url"
+echo "RTK_AVAILABLE=$(rtk_installed && echo true || echo false)"
+echo "TOKEN_FILTER=$(git_output_filter)"
 echo "WORKTREE_DIRTY=$worktree_dirty"
 echo "NEEDS_FORCE=$needs_force"
 echo "PUSH_COMMAND=$push_command"
@@ -76,6 +78,6 @@ else
   echo "AHEAD_REMOTE_COUNT=unknown"
 fi
 
-print_section COMMITS_AHEAD git log --oneline "origin/$default_branch..HEAD"
-print_section DIFF_STAT git diff --stat "origin/$default_branch..HEAD"
-print_section STATUS git status --porcelain
+print_section COMMITS_AHEAD compact_git log --oneline "origin/$default_branch..HEAD"
+print_section DIFF_STAT compact_git diff --stat "origin/$default_branch..HEAD"
+print_section STATUS compact_git status --porcelain

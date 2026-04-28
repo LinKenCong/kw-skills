@@ -14,6 +14,44 @@ print_section() {
   rm -f "$output_file"
 }
 
+rtk_installed() {
+  command -v rtk >/dev/null 2>&1
+}
+
+rtk_enabled() {
+  case "${GIT_SYNC_PUSH_RTK:-auto}" in
+    0|false|FALSE|False|no|NO|No|off|OFF|Off)
+      return 1
+      ;;
+  esac
+
+  rtk_installed
+}
+
+git_output_filter() {
+  if rtk_enabled; then
+    echo "rtk"
+  else
+    echo "raw"
+  fi
+}
+
+compact_git() {
+  local rtk_output
+
+  if rtk_enabled; then
+    rtk_output=$(mktemp "${TMPDIR:-/tmp}/git-sync-push-rtk.XXXXXX")
+    if rtk git "$@" >"$rtk_output" 2>/dev/null; then
+      cat "$rtk_output"
+      rm -f "$rtk_output"
+      return 0
+    fi
+    rm -f "$rtk_output"
+  fi
+
+  git "$@"
+}
+
 git_path() {
   git rev-parse --git-path "$1"
 }
