@@ -26,8 +26,10 @@ npx skills add LinKenCong/kw-skills --skill '*'
 
 ## Included skills
 
-- `skill-template-manager` — manager-owned skill store, reusable symlink templates, and project-level skill activation
+- `figma-react-restore` — restore, implement, compare, verify, or repair Figma designs in existing React projects using local extraction and browser verification artifacts
+- `figma-to-code` — extract live Figma design data through a local plugin and bridge, then translate designs into production frontend code
 - `git-sync-push` — safe Git sync-and-push workflow for feature branches
+- `skill-template-manager` — manager-owned skill store, reusable symlink templates, and project-level skill activation
 
 ## Notes
 
