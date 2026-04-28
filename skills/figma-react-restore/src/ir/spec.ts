@@ -28,10 +28,15 @@ export function buildFidelitySpec(options: {
   const spec = fidelitySpecSchema.parse({
     schemaVersion: 1,
     runId: options.runId,
+    evidenceLevel: options.ir.evidenceLevel,
     route: options.route || '',
     viewport: { width, height, dpr: options.viewport?.dpr || 1 },
     baselineScreenshot,
     regions: options.ir.regions,
+    texts: options.ir.texts,
+    assets: options.ir.assets,
+    colors: options.ir.colors,
+    typography: options.ir.typography,
     thresholds: DEFAULT_THRESHOLDS,
   });
   store.writeRunJson(options.runId, 'fidelity-spec.json', spec, { kind: 'fidelity-spec', mediaType: 'application/json' });

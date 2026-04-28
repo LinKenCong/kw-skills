@@ -14,13 +14,15 @@ import {
 const CATEGORY_RANK: Record<Failure['category'], number> = {
   'wrong-state': 0,
   'scale-mismatch': 1,
-  'layout-spacing': 2,
-  typography: 3,
-  'asset-missing': 4,
-  'asset-crop': 5,
-  color: 6,
-  'overflow-clipping': 7,
-  'insufficient-design-data': 8,
+  'text-content': 2,
+  'layout-spacing': 3,
+  typography: 4,
+  'asset-missing': 5,
+  'asset-crop': 6,
+  'screenshot-overlay': -2,
+  color: 7,
+  'overflow-clipping': 8,
+  'insufficient-design-data': 9,
   'blocked-environment': -1,
 };
 
@@ -106,12 +108,16 @@ function recommendedAction(failure: Failure): string {
       return `Align viewport, page width, root scale, and screenshot baseline dimensions before local fixes${suffix}.`;
     case 'layout-spacing':
       return `Fix macro layout first: container width, section position, padding, gap, alignment, and element box size${suffix}.`;
+    case 'text-content':
+      return `Replace rendered copy with the exact Figma text before visual tuning${suffix}: expected "${expectedText(failure)}".`;
     case 'typography':
-      return `Match text content, font family, font size, weight, line-height, max-width, and wrapping${suffix}.`;
+      return `Match text metrics with reasonable tolerance: font family, font size, weight, line-height, max-width, and wrapping${suffix}.`;
     case 'asset-missing':
       return `Provide the missing image/icon asset or update the route state so the asset loads${suffix}.`;
     case 'asset-crop':
       return `Adjust image source, object-fit, object-position, crop, and rendered box size${suffix}.`;
+    case 'screenshot-overlay':
+      return `Remove full-page or large raster screenshot overlays and rebuild the design as live DOM/CSS with real assets only${suffix}.`;
     case 'color':
       return `After layout is stable, match fill, text color, border, gradient, shadow, and opacity${suffix}.`;
     case 'overflow-clipping':
@@ -135,15 +141,19 @@ function buildNextActions(failures: RepairFailure[], report: VerifyReport): stri
   const first = failures[0]!;
   const actions: string[] = [];
   if (first.category === 'scale-mismatch' || first.category === 'wrong-state') actions.push(first.recommendedAction);
+  const overlays = failures.filter((failure) => failure.category === 'screenshot-overlay').slice(0, 2);
+  if (overlays.length > 0) actions.push(`Remove prohibited screenshot/large-raster overlays before any visual tuning: ${overlays.map(labelFailure).join(' -> ')}.`);
+  const textContent = failures.filter((failure) => failure.category === 'text-content').slice(0, 5);
+  if (textContent.length > 0) actions.push(`Fix exact text content first: ${textContent.map(labelFailureWithExpected).join(' -> ')}.`);
   const layout = failures.filter((failure) => failure.category === 'layout-spacing').slice(0, 3);
   if (layout.length > 0) actions.push(`Repair layout boxes in priority order: ${layout.map(labelFailure).join(' -> ')}.`);
   const typography = failures.filter((failure) => failure.category === 'typography').slice(0, 3);
-  if (typography.length > 0) actions.push(`Then repair text metrics/content: ${typography.map(labelFailure).join(' -> ')}.`);
+  if (typography.length > 0) actions.push(`Then repair text metrics with tolerance: ${typography.map(labelFailure).join(' -> ')}.`);
   const assets = failures.filter((failure) => failure.category === 'asset-missing' || failure.category === 'asset-crop').slice(0, 3);
   if (assets.length > 0) actions.push(`Then repair assets: ${assets.map(labelFailure).join(' -> ')}.`);
   const overflow = failures.filter((failure) => failure.category === 'overflow-clipping').slice(0, 2);
   if (overflow.length > 0) actions.push(`Check overflow only after layout fixes: ${overflow.map(labelFailure).join(' -> ')}.`);
-  actions.push(`After patching, rerun restore/verify for attempt ${report.attemptId}; do not optimize colors until layout and typography failures decrease.`);
+  actions.push(`After patching, rerun restore/verify for attempt ${report.attemptId}; do not optimize colors until exact text, layout, and typography failures decrease.`);
   return actions;
 }
 
@@ -154,4 +164,14 @@ function blockedAction(failure?: Failure): string {
 
 function labelFailure(failure: RepairFailure): string {
   return failure.regionId || failure.nodeId || failure.selector || failure.failureId || createId('failure');
+}
+
+function labelFailureWithExpected(failure: RepairFailure): string {
+  const label = labelFailure(failure);
+  return `${label}="${expectedText(failure)}"`;
+}
+
+function expectedText(failure: Failure): string {
+  const value = failure.expected?.text;
+  return typeof value === 'string' ? value : '';
 }

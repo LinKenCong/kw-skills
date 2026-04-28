@@ -11,6 +11,7 @@ const baseReport = {
   regionResults: [],
   domResults: [],
   warnings: [],
+  textResults: [],
 };
 
 test('repair planner prioritizes layout before typography and assets', () => {
@@ -28,6 +29,21 @@ test('repair planner prioritizes layout before typography and assets', () => {
   assert.match(plan.nextActions.join('\n'), /Repair layout/);
 });
 
+test('repair planner prioritizes exact text content before layout tuning', () => {
+  const plan = createRepairPlan({
+    ...baseReport,
+    status: 'failed',
+    textResults: [{ nodeId: 't1', status: 'failed', expectedText: 'Exact Copy', actualText: 'Guessed Copy', normalizedExpected: 'Exact Copy', normalizedActual: 'Guessed Copy' }],
+    failures: [
+      { failureId: 'f1', category: 'layout-spacing', severity: 'high', message: 'layout' },
+      { failureId: 'f2', category: 'text-content', severity: 'high', message: 'text mismatch', nodeId: 't1', expected: { text: 'Exact Copy' }, actual: { text: 'Guessed Copy' } },
+    ],
+  });
+  assert.equal(plan.worstFailures[0].category, 'text-content');
+  assert.match(plan.nextActions.join('\n'), /Fix exact text content first/);
+  assert.match(plan.nextActions.join('\n'), /Exact Copy/);
+});
+
 test('repair planner blocks on critical environment failure', () => {
   const plan = createRepairPlan({
     ...baseReport,
@@ -36,4 +52,17 @@ test('repair planner blocks on critical environment failure', () => {
   });
   assert.equal(plan.status, 'blocked');
   assert.match(plan.blockedReason, /browser missing/);
+});
+
+test('repair planner prioritizes prohibited screenshot overlays', () => {
+  const plan = createRepairPlan({
+    ...baseReport,
+    status: 'failed',
+    failures: [
+      { failureId: 'f2', category: 'layout-spacing', severity: 'critical', message: 'layout' },
+      { failureId: 'f1', category: 'screenshot-overlay', severity: 'critical', message: 'large raster overlay', selector: 'img.hero' },
+    ],
+  });
+  assert.equal(plan.worstFailures[0].category, 'screenshot-overlay');
+  assert.match(plan.nextActions.join('\n'), /Remove prohibited screenshot/);
 });

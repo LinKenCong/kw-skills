@@ -27,6 +27,14 @@ export function inspectReactProject(projectRoot: string): ReactProjectInfo {
   };
 }
 
+export function assertReactProjectRoot(projectRoot: string): ReactProjectInfo {
+  const info = inspectReactProject(projectRoot);
+  if (info.warnings.length > 0) {
+    throw new Error(`Invalid React project root: ${info.root} (${info.warnings.join('; ')}). Run from the React project root or pass --project <dir>.`);
+  }
+  return info;
+}
+
 export async function waitForRoute(route: string, options: { timeoutMs?: number; intervalMs?: number } = {}): Promise<void> {
   const timeoutMs = options.timeoutMs || 45000;
   const intervalMs = options.intervalMs || 750;

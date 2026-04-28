@@ -9,7 +9,6 @@ export type StartServiceOptions = {
   workspaceRoot?: string;
   artifactRoot?: string;
   port?: number;
-  token?: string;
   silent?: boolean;
 };
 
@@ -19,7 +18,7 @@ export function startRuntimeService(options: StartServiceOptions = {}): void {
   const store = new ArtifactStore({ workspaceRoot: lock.workspaceRoot, artifactRoot: lock.artifactRoot });
   store.ensure();
   writeServiceLock(lock);
-  const state = new RuntimeState({ token: lock.token, store });
+  const state = new RuntimeState({ store });
   const app = createRuntimeApp(state);
   const server = serve({ fetch: app.fetch, port });
 
@@ -37,6 +36,6 @@ export function startRuntimeService(options: StartServiceOptions = {}): void {
   });
 
   if (!options.silent) {
-    process.stdout.write(`${JSON.stringify({ ok: true, service: lock.service, url: lock.url, token: lock.token, lockFile: '.figma-react-restore/service.json' }, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify({ ok: true, service: lock.service, url: lock.url, lockFile: '.figma-react-restore/service.json' }, null, 2)}\n`);
   }
 }

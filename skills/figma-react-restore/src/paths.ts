@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 export const DEFAULT_ARTIFACT_DIR = '.figma-react-restore';
-export const DEFAULT_PORT = 39217;
+export const DEFAULT_PORT = 49327;
 export const SERVICE_LOCK_FILE = 'service.json';
 
 export function resolveWorkspaceRoot(input = process.cwd()): string {

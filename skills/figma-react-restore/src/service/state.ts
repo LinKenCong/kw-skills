@@ -35,15 +35,15 @@ export type EventSubscriber = {
   send: (event: RuntimeEvent) => void;
 };
 
+const SESSION_TTL_MS = 15_000;
+
 export class RuntimeState {
-  readonly token: string;
   readonly store: ArtifactStore;
   readonly sessions = new Map<string, RuntimeSession>();
   readonly jobs = new Map<string, RuntimeJob>();
   readonly subscribers = new Map<string, Set<EventSubscriber>>();
 
-  constructor(options: { token: string; store: ArtifactStore }) {
-    this.token = options.token;
+  constructor(options: { store: ArtifactStore }) {
     this.store = options.store;
   }
 
@@ -61,10 +61,12 @@ export class RuntimeState {
   }
 
   listSessions(): RuntimeSession[] {
+    this.pruneStaleSessions();
     return [...this.sessions.values()].sort((a, b) => a.registeredAt.localeCompare(b.registeredAt));
   }
 
   chooseSession(sessionId?: string): RuntimeSession {
+    this.pruneStaleSessions();
     if (sessionId) {
       const session = this.sessions.get(sessionId);
       if (!session || !session.connected) throw new Error(`Plugin session not connected: ${sessionId}`);
@@ -106,6 +108,12 @@ export class RuntimeState {
     const job = this.jobs.get(jobId);
     if (!job) throw new Error(`Unknown job: ${jobId}`);
     return job;
+  }
+
+  listJobsForSession(sessionId: string): RuntimeJob[] {
+    return [...this.jobs.values()]
+      .filter((job) => job.sessionId === sessionId)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
 
   updateJob(jobId: string, patch: Partial<RuntimeJob>): RuntimeJob {
@@ -159,5 +167,14 @@ export class RuntimeState {
 
   activeJobCount(): number {
     return [...this.jobs.values()].filter((job) => job.status === 'pending' || job.status === 'running').length;
+  }
+
+  private pruneStaleSessions(): void {
+    const now = Date.now();
+    for (const [sessionId, session] of this.sessions) {
+      const lastSeen = Date.parse(session.lastSeenAt);
+      if (!Number.isFinite(lastSeen) || now - lastSeen <= SESSION_TTL_MS) continue;
+      this.sessions.set(sessionId, { ...session, connected: false });
+    }
   }
 }

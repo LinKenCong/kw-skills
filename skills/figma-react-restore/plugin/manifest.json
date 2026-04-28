@@ -7,8 +7,8 @@
   "editorType": ["figma"],
   "documentAccess": "dynamic-page",
   "networkAccess": {
-    "allowedDomains": ["http://localhost:39217", "http://127.0.0.1:39217"],
-    "devAllowedDomains": ["http://localhost:39217", "http://127.0.0.1:39217"],
-    "reasoning": "Communicates with the local figma-react-restore runtime service."
+    "allowedDomains": ["none"],
+    "devAllowedDomains": ["http://localhost:49327"],
+    "reasoning": "Runtime communication is local-only over localhost and enabled only for the development plugin import."
   }
 }

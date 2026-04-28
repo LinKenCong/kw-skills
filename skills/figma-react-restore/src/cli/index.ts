@@ -8,9 +8,12 @@ import { runDoctor } from '../doctor/index.js';
 import { readJsonFile } from '../json.js';
 import { DEFAULT_PORT } from '../paths.js';
 import { createRepairPlanFromFile } from '../restore/repair-plan.js';
+import { assertReactProjectRoot } from '../react/project.js';
 import { runRestoreAttempt } from '../restore/loop.js';
+import { startDevRuntimeService } from '../service/dev.js';
 import { readServiceLock } from '../service/lockfile.js';
 import { startRuntimeService } from '../service/index.js';
+import { createAgentBriefFromFiles, createCliSummary } from '../summary/agent-brief.js';
 import { runVerification } from '../verify/report.js';
 
 const program = new Command();
@@ -33,10 +36,23 @@ program.command('doctor')
 const service = program.command('service').description('Runtime service commands');
 service.command('start')
   .option('--project <dir>', 'Workspace/project root', process.cwd())
-  .option('--port <port>', 'Service port', parseIntOption, DEFAULT_PORT)
-  .option('--token <token>', 'Explicit token for automation')
   .action(wrap(async (options) => {
-    startRuntimeService({ workspaceRoot: path.resolve(options.project), port: options.port, token: options.token });
+    const projectRoot = path.resolve(options.project);
+    assertReactProjectRoot(projectRoot);
+    startRuntimeService({ workspaceRoot: projectRoot, port: DEFAULT_PORT });
+  }));
+service.command('dev')
+  .description('Start runtime service with TypeScript watch rebuild and automatic service restart')
+  .option('--project <dir>', 'Workspace/project root', process.cwd())
+  .option('--no-compile', 'Do not run tsc --watch; only restart when dist files change')
+  .action(wrap(async (options) => {
+    const projectRoot = path.resolve(options.project);
+    assertReactProjectRoot(projectRoot);
+    startDevRuntimeService({
+      projectRoot,
+      port: DEFAULT_PORT,
+      compile: options.compile,
+    });
   }));
 
 program.command('sessions')
@@ -77,7 +93,15 @@ program.command('build-ir')
     const ir = buildMinimalDesignIr(options.run, store);
     const viewport = parseViewport(options.viewport, options.dpr);
     const spec = buildFidelitySpec({ runId: options.run, ir, route: options.route, viewport, store });
-    printJson({ ok: true, runId: options.run, designIrPath: store.findArtifact(options.run, 'design-ir')?.path, fidelitySpecPath: store.findArtifact(options.run, 'fidelity-spec')?.path, evidenceLevel: ir.evidenceLevel, viewport: spec.viewport });
+    printJson({
+      ok: true,
+      runId: options.run,
+      designIrPath: store.findArtifact(options.run, 'design-ir')?.path,
+      textManifestPath: store.findArtifact(options.run, 'text-manifest')?.path,
+      fidelitySpecPath: store.findArtifact(options.run, 'fidelity-spec')?.path,
+      evidenceLevel: ir.evidenceLevel,
+      viewport: spec.viewport,
+    });
   }));
 
 program.command('verify')
@@ -86,6 +110,7 @@ program.command('verify')
   .requiredOption('--spec <path>', 'Fidelity spec JSON path')
   .option('--output-dir <dir>', 'Output directory for screenshots/report')
   .option('--wait-ms <ms>', 'Extra wait before screenshot', parseIntOption, 0)
+  .option('--full-report', 'Print full verify report instead of token-optimized summary')
   .action(wrap(async (options) => {
     const verifyOptions = {
       projectRoot: path.resolve(options.project),
@@ -95,17 +120,49 @@ program.command('verify')
       ...(options.outputDir ? { outputDir: path.resolve(options.outputDir) } : {}),
     };
     const result = await runVerification(verifyOptions);
-    printJson({ ok: result.report.status === 'passed', reportPath: result.reportPath, report: result.report });
+    const { brief, briefPath } = createAgentBriefFromFiles({ reportPath: result.reportPath });
+    printJson({
+      ok: result.report.status === 'passed',
+      reportPath: result.reportPath,
+      briefPath,
+      summary: createCliSummary(brief),
+      ...(options.fullReport ? { report: result.report } : {}),
+    });
     if (result.report.status !== 'passed') process.exitCode = 1;
   }));
 
 program.command('repair-plan')
   .requiredOption('--report <path>', 'Verify report JSON path')
   .option('--output <path>', 'Repair plan output path')
+  .option('--full-plan', 'Print full repair plan instead of token-optimized summary')
   .action(wrap(async (options) => {
-    const { plan, planPath } = createRepairPlanFromFile(path.resolve(options.report), options.output ? path.resolve(options.output) : undefined);
-    printJson({ ok: plan.status !== 'blocked', planPath, plan });
+    const reportPath = path.resolve(options.report);
+    const { plan, planPath } = createRepairPlanFromFile(reportPath, options.output ? path.resolve(options.output) : undefined);
+    const { brief, briefPath } = createAgentBriefFromFiles({ reportPath, planPath });
+    printJson({
+      ok: plan.status !== 'blocked',
+      planPath,
+      briefPath,
+      summary: createCliSummary(brief),
+      ...(options.fullPlan ? { plan } : {}),
+    });
     if (plan.status === 'blocked') process.exitCode = 1;
+  }));
+
+program.command('brief')
+  .description('Create a token-optimized agent brief from verify report and optional repair plan')
+  .requiredOption('--report <path>', 'Verify report JSON path')
+  .option('--plan <path>', 'Repair plan JSON path; defaults to sibling repair-plan.json when present')
+  .option('--output <path>', 'Agent brief output path; defaults to sibling agent-brief.json')
+  .option('--max-failures <count>', 'Maximum top failures to include', parseIntOption, 10)
+  .action(wrap(async (options) => {
+    const { brief, briefPath } = createAgentBriefFromFiles({
+      reportPath: path.resolve(options.report),
+      ...(options.plan ? { planPath: path.resolve(options.plan) } : {}),
+      ...(options.output ? { outputPath: path.resolve(options.output) } : {}),
+      maxFailures: Number(options.maxFailures),
+    });
+    printJson({ ok: true, briefPath, summary: createCliSummary(brief) });
   }));
 
 program.command('restore')
@@ -113,6 +170,7 @@ program.command('restore')
   .requiredOption('--route <url>', 'Route URL')
   .requiredOption('--run <runId>', 'Extraction/build-ir run id')
   .option('--dev-command <cmd>', 'Command to start the React dev server')
+  .option('--max-iterations <count>', 'Maximum restore attempts before blocking', parseIntOption, 3)
   .option('--wait-ms <ms>', 'Extra wait before screenshot', parseIntOption, 0)
   .action(wrap(async (options) => {
     const projectRoot = path.resolve(options.project);
@@ -121,6 +179,7 @@ program.command('restore')
       route: options.route,
       runId: options.run,
       devCommand: options.devCommand,
+      maxIterations: Number(options.maxIterations),
       waitMs: Number(options.waitMs),
     }, new ArtifactStore({ workspaceRoot: projectRoot }));
     printJson({ ok: result.status === 'passed', ...result });
@@ -157,8 +216,7 @@ function requireLock(projectRoot: string): ServiceLock {
 async function serviceFetch(lock: ServiceLock, endpoint: string, options: { method?: string; body?: unknown } = {}): Promise<unknown> {
   const init: RequestInit = {
     method: options.method || 'GET',
-    headers: { authorization: `Bearer ${lock.token}`, ...(options.body ? { 'content-type': 'application/json' } : {}) },
-    ...(options.body ? { body: JSON.stringify(options.body) } : {}),
+    ...(options.body ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify(options.body) } : {}),
   };
   const response = await fetch(`${lock.url}${endpoint}`, init);
   const data = await response.json() as unknown;

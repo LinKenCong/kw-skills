@@ -20,9 +20,11 @@ export const artifactKindSchema = z.enum([
   'screenshot',
   'asset',
   'design-ir',
+  'text-manifest',
   'fidelity-spec',
   'verify-report',
   'repair-plan',
+  'agent-brief',
   'trace',
   'diff',
 ]);
@@ -79,21 +81,45 @@ export type Region = z.infer<typeof regionSchema>;
 
 export const textEvidenceSchema = z.object({
   nodeId: z.string().optional(),
+  name: z.string().optional(),
   text: z.string(),
   box: boxSchema.optional(),
   fontFamily: z.string().optional(),
   fontSize: z.number().optional(),
   fontWeight: z.union([z.string(), z.number()]).optional(),
   lineHeight: z.union([z.string(), z.number()]).optional(),
+  letterSpacing: z.union([z.string(), z.number()]).optional(),
+  textCase: z.string().optional(),
+  textAlignHorizontal: z.string().optional(),
+  textAlignVertical: z.string().optional(),
+  textAutoResize: z.string().optional(),
   color: z.string().optional(),
 });
 export type TextEvidence = z.infer<typeof textEvidenceSchema>;
 
+export const textManifestSchema = z.object({
+  schemaVersion: z.literal(1),
+  kind: z.literal('text-manifest'),
+  runId: z.string(),
+  source: z.enum(['figma-text-nodes', 'screenshot-ocr', 'manual']),
+  textCount: z.number().int().nonnegative(),
+  items: z.array(textEvidenceSchema),
+  warnings: z.array(warningSchema),
+});
+export type TextManifest = z.infer<typeof textManifestSchema>;
+
 export const assetEvidenceSchema = z.object({
   artifactId: z.string().optional(),
+  fallbackArtifactId: z.string().optional(),
   nodeId: z.string().optional(),
   path: z.string().optional(),
+  fallbackPath: z.string().optional(),
   kind: z.enum(['image', 'svg', 'screenshot', 'unknown']).default('unknown'),
+  preferredFormat: z.enum(['svg', 'png', 'jpg', 'gif', 'unknown']).default('unknown'),
+  allowedUse: z.enum(['implementation', 'reference-only']).default('implementation'),
+  sourceKind: z.enum(['image-fill', 'vector', 'node-export', 'unknown']).default('unknown'),
+  mediaType: z.string().optional(),
+  fallbackMediaType: z.string().optional(),
 });
 export type AssetEvidence = z.infer<typeof assetEvidenceSchema>;
 
@@ -109,6 +135,7 @@ export const typographyEvidenceSchema = z.object({
   fontSize: z.number().optional(),
   fontWeight: z.union([z.string(), z.number()]).optional(),
   lineHeight: z.union([z.string(), z.number()]).optional(),
+  letterSpacing: z.union([z.string(), z.number()]).optional(),
   nodeId: z.string().optional(),
 });
 export type TypographyEvidence = z.infer<typeof typographyEvidenceSchema>;
@@ -147,10 +174,15 @@ export type MinimalDesignIR = z.infer<typeof minimalDesignIrSchema>;
 export const fidelitySpecSchema = z.object({
   schemaVersion: z.literal(1),
   runId: z.string(),
+  evidenceLevel: z.enum(['L3-structured', 'L2-partial', 'L1-visual-only', 'L0-blocked']).optional(),
   route: z.string(),
   viewport: viewportSchema,
   baselineScreenshot: z.string(),
   regions: z.array(regionSchema),
+  texts: z.array(textEvidenceSchema).default([]),
+  assets: z.array(assetEvidenceSchema).default([]),
+  colors: z.array(colorEvidenceSchema).default([]),
+  typography: z.array(typographyEvidenceSchema).default([]),
   thresholds: z.object({
     fullPageMaxDiffRatio: z.number().min(0).max(1),
     regionMaxDiffRatio: z.number().min(0).max(1),
@@ -160,11 +192,13 @@ export const fidelitySpecSchema = z.object({
 export type FidelitySpec = z.infer<typeof fidelitySpecSchema>;
 
 export const failureCategorySchema = z.enum([
+  'text-content',
   'layout-spacing',
   'typography',
   'color',
   'asset-missing',
   'asset-crop',
+  'screenshot-overlay',
   'overflow-clipping',
   'wrong-state',
   'scale-mismatch',
@@ -210,8 +244,21 @@ export const domResultSchema = z.object({
 });
 export type DomResult = z.infer<typeof domResultSchema>;
 
+export const textResultSchema = z.object({
+  nodeId: z.string().optional(),
+  selector: z.string().optional(),
+  status: z.enum(['passed', 'failed', 'missing', 'mapping-missing', 'skipped']),
+  expectedText: z.string(),
+  actualText: z.string().optional(),
+  normalizedExpected: z.string(),
+  normalizedActual: z.string().optional(),
+  message: z.string().optional(),
+});
+export type TextResult = z.infer<typeof textResultSchema>;
+
 export const verifyReportSchema = z.object({
   schemaVersion: z.literal(1),
+  runId: z.string().optional(),
   status: z.enum(['passed', 'failed', 'blocked']),
   attemptId: z.string(),
   route: z.string(),
@@ -225,6 +272,7 @@ export const verifyReportSchema = z.object({
   }),
   regionResults: z.array(regionResultSchema),
   domResults: z.array(domResultSchema),
+  textResults: z.array(textResultSchema).default([]),
   failures: z.array(failureSchema),
   warnings: z.array(warningSchema),
 });
@@ -247,6 +295,66 @@ export const repairPlanSchema = z.object({
 });
 export type RepairPlan = z.infer<typeof repairPlanSchema>;
 
+export const agentBriefFailureSchema = z.object({
+  category: failureCategorySchema,
+  severity: z.enum(['low', 'medium', 'high', 'critical']),
+  message: z.string(),
+  regionId: z.string().optional(),
+  nodeId: z.string().optional(),
+  selector: z.string().optional(),
+  evidencePath: z.string().optional(),
+  expected: z.record(z.unknown()).optional(),
+  actual: z.record(z.unknown()).optional(),
+  recommendedAction: z.string().optional(),
+  confidence: z.number().min(0).max(1).optional(),
+});
+export type AgentBriefFailure = z.infer<typeof agentBriefFailureSchema>;
+
+export const agentBriefSchema = z.object({
+  schemaVersion: z.literal(1),
+  kind: z.literal('agent-brief'),
+  attemptId: z.string(),
+  route: z.string(),
+  reportStatus: z.enum(['passed', 'failed', 'blocked']),
+  repairStatus: z.enum(['needs-repair', 'passed', 'blocked']).optional(),
+  tokenPolicy: z.object({
+    readFirst: z.array(z.string()),
+    avoidByDefault: z.array(z.string()),
+    maxFailures: z.number().int().positive(),
+  }),
+  metrics: z.object({
+    viewport: viewportSchema,
+    fullPageDiffRatio: z.number().min(0),
+    fullPageDiffPixels: z.number().int().nonnegative(),
+    failureCount: z.number().int().nonnegative(),
+    failedRegionCount: z.number().int().nonnegative(),
+    failedDomCount: z.number().int().nonnegative(),
+    failedTextCount: z.number().int().nonnegative().optional(),
+    warningCount: z.number().int().nonnegative(),
+  }),
+  artifactPaths: z.object({
+    reportPath: z.string().optional(),
+    repairPlanPath: z.string().optional(),
+    textManifestPath: z.string().optional(),
+    expectedPath: z.string().optional(),
+    actualPath: z.string().optional(),
+    diffPath: z.string().optional(),
+    tracePath: z.string().optional(),
+  }),
+  failureCounts: z.record(z.number().int().nonnegative()),
+  nextActions: z.array(z.string()),
+  topFailures: z.array(agentBriefFailureSchema),
+  topRegions: z.array(z.object({
+    regionId: z.string(),
+    nodeId: z.string().optional(),
+    diffRatio: z.number().min(0),
+    status: z.enum(['passed', 'failed', 'skipped']),
+    diffPath: z.string().optional(),
+  })),
+  warnings: z.array(warningSchema),
+});
+export type AgentBrief = z.infer<typeof agentBriefSchema>;
+
 export const restoreAttemptSchema = z.object({
   attemptId: z.string(),
   index: z.number().int().positive(),
@@ -255,6 +363,7 @@ export const restoreAttemptSchema = z.object({
   status: z.enum(['running', 'passed', 'failed', 'blocked']),
   reportPath: z.string().optional(),
   repairPlanPath: z.string().optional(),
+  agentBriefPath: z.string().optional(),
   patchSummaryPath: z.string().optional(),
 });
 export type RestoreAttempt = z.infer<typeof restoreAttemptSchema>;
@@ -275,6 +384,11 @@ export const rawFigmaNodeSchema: z.ZodType<RawFigmaNode> = z.lazy(() =>
     fontSize: z.number().optional(),
     fontWeight: z.union([z.string(), z.number()]).optional(),
     lineHeight: z.unknown().optional(),
+    letterSpacing: z.unknown().optional(),
+    textCase: z.string().optional(),
+    textAlignHorizontal: z.string().optional(),
+    textAlignVertical: z.string().optional(),
+    textAutoResize: z.string().optional(),
     layoutMode: z.string().optional(),
     itemSpacing: z.number().optional(),
     paddingLeft: z.number().optional(),
@@ -299,6 +413,11 @@ export type RawFigmaNode = {
   fontSize?: number | undefined;
   fontWeight?: string | number | undefined;
   lineHeight?: unknown;
+  letterSpacing?: unknown;
+  textCase?: string | undefined;
+  textAlignHorizontal?: string | undefined;
+  textAlignVertical?: string | undefined;
+  textAutoResize?: string | undefined;
   layoutMode?: string | undefined;
   itemSpacing?: number | undefined;
   paddingLeft?: number | undefined;
@@ -387,7 +506,6 @@ export const serviceLockSchema = z.object({
   pid: z.number().int().positive(),
   port: z.number().int().positive(),
   url: z.string(),
-  token: z.string(),
   startedAt: z.string(),
   workspaceRoot: z.string(),
   artifactRoot: z.string(),

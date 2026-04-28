@@ -1,0 +1,9 @@
+:root { font-family: Helvetica, Arial, sans-serif; color: #172033; background: #f3efe6; }
+body { margin: 0; }
+.page { width: 1200px; min-height: 800px; padding: 72px; box-sizing: border-box; }
+.hero { display: flex; gap: 48px; align-items: center; width: 1056px; min-height: 560px; padding: 56px; border-radius: 32px; background: #fffaf0; box-sizing: border-box; }
+.panel { width: 420px; height: 420px; border-radius: 28px; background: linear-gradient(135deg, #e25d3f, #f4c16e); }
+.copy { max-width: 440px; }
+h1 { margin: 0 0 20px; font-size: 58px; line-height: 1.02; font-weight: 800; color: #172033; }
+p { margin: 0 0 28px; font-size: 20px; line-height: 1.5; color: #4b5870; }
+button { padding: 16px 24px; border: 0; border-radius: 999px; background: #172033; color: white; font-size: 18px; font-weight: 700; }

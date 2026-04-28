@@ -6,10 +6,19 @@
   "bin": {
     "figma-react-restore": "./dist/cli/index.js"
   },
+  "files": [
+    "dist/",
+    "plugin/",
+    "README.md",
+    "SKILL.md"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test tests/*.test.mjs"
+    "dev:service": "npm run build && node dist/cli/index.js service dev",
+    "prepack": "npm run build",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "test:browser": "npm run build && FRR_BROWSER_TEST=1 node --test tests/browser.test.mjs"
   },
   "dependencies": {
     "@hono/node-server": "^1.14.0",

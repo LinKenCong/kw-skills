@@ -6,57 +6,70 @@
     :root { font: 12px/1.45 ui-sans-serif, system-ui, sans-serif; color: var(--figma-color-text); background: var(--figma-color-bg); }
     body { margin: 0; padding: 16px; }
     h1 { font-size: 15px; margin: 0 0 12px; }
-    label { display: block; margin: 10px 0 4px; color: var(--figma-color-text-secondary); }
-    input { box-sizing: border-box; width: 100%; padding: 8px; border: 1px solid var(--figma-color-border); border-radius: 6px; background: var(--figma-color-bg-secondary); color: var(--figma-color-text); }
-    button { margin-top: 10px; width: 100%; padding: 8px 10px; border: 0; border-radius: 6px; background: var(--figma-color-bg-brand); color: var(--figma-color-text-onbrand); font-weight: 600; cursor: pointer; }
-    button.secondary { background: var(--figma-color-bg-secondary); color: var(--figma-color-text); border: 1px solid var(--figma-color-border); }
-    pre { height: 205px; overflow: auto; padding: 10px; border-radius: 6px; background: var(--figma-color-bg-secondary); white-space: pre-wrap; }
-    .row { display: flex; gap: 8px; }
-    .row button { flex: 1; }
+    code { padding: 2px 5px; border-radius: 4px; background: var(--figma-color-bg-secondary); }
+    pre { height: 315px; overflow: auto; padding: 10px; border-radius: 6px; background: var(--figma-color-bg-secondary); white-space: pre-wrap; }
     .status { margin: 8px 0; color: var(--figma-color-text-secondary); }
+    .status strong { color: var(--figma-color-text); }
   </style>
 </head>
 <body>
   <h1>Figma React Restore</h1>
-  <label>Runtime URL</label>
-  <input id="serviceUrl" value="http://127.0.0.1:39217" />
-  <label>Runtime token</label>
-  <input id="token" placeholder="Paste token from figma-react-restore service start" />
-  <div class="row">
-    <button id="register">Register</button>
-    <button id="connect" class="secondary">Connect Events</button>
-  </div>
-  <button id="refresh" class="secondary">Refresh Session Info</button>
-  <div id="status" class="status">Not registered</div>
+  <div class="status">Runtime: <code id="endpoint"></code></div>
+  <div id="status" class="status"><strong>Starting</strong></div>
+  <div class="status">Keep this plugin window open. It registers automatically and listens for extraction jobs.</div>
   <pre id="log"></pre>
 <script>
+const SERVICE_URL = 'http://localhost:49327';
+const HEARTBEAT_MS = 5000;
+const POLL_MS = 1000;
+
+function storageGet(key) {
+  try {
+    return window.localStorage ? window.localStorage.getItem(key) : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function storageSet(key, value) {
+  try {
+    if (window.localStorage) window.localStorage.setItem(key, value);
+  } catch (_error) {
+    // Figma may load plugin UI from a data: URL where localStorage is disabled.
+  }
+}
+
 const state = {
-  pluginSessionId: localStorage.getItem('frr.sessionId') || `ps_${Date.now().toString(36)}_${Math.random().toString(16).slice(2)}`,
-  serviceUrl: localStorage.getItem('frr.serviceUrl') || 'http://127.0.0.1:39217',
-  token: localStorage.getItem('frr.token') || '',
+  pluginSessionId: storageGet('frr.sessionId') || `ps_${Date.now().toString(36)}_${Math.random().toString(16).slice(2)}`,
   session: null,
   events: null,
+  pollTimer: null,
+  heartbeatTimer: null,
+  reconnectTimer: null,
+  reconnectDelayMs: 1000,
+  connecting: false,
+  registered: false,
+  handledJobs: {},
 };
-localStorage.setItem('frr.sessionId', state.pluginSessionId);
-const serviceUrlInput = document.getElementById('serviceUrl');
-const tokenInput = document.getElementById('token');
+storageSet('frr.sessionId', state.pluginSessionId);
+
+const endpointEl = document.getElementById('endpoint');
 const statusEl = document.getElementById('status');
 const logEl = document.getElementById('log');
-serviceUrlInput.value = state.serviceUrl;
-tokenInput.value = state.token;
+endpointEl.textContent = SERVICE_URL;
 
-document.getElementById('register').onclick = () => register().catch(showError);
-document.getElementById('connect').onclick = () => connectEvents().catch(showError);
-document.getElementById('refresh').onclick = () => parent.postMessage({ pluginMessage: { type: 'get-session' } }, '*');
-parent.postMessage({ pluginMessage: { type: 'get-session' } }, '*');
-
-window.onmessage = async (event) => {
+window.onmessage = async function (event) {
   const message = event.data.pluginMessage;
   if (!message) return;
   if (message.type === 'session-info') {
     state.session = message.session;
-    statusEl.textContent = `Session ${state.pluginSessionId}; selection=${message.session.selectionCount}`;
+    setStatus(`Session ${state.pluginSessionId}; selection=${message.session.selectionCount}`);
     log(`Session info: ${JSON.stringify(message.session)}`);
+    if (state.registered) {
+      registerSession(true).catch(handleConnectionError);
+    } else {
+      scheduleReconnect('session info', 0);
+    }
     return;
   }
   if (message.type === 'progress') {
@@ -70,36 +83,148 @@ window.onmessage = async (event) => {
     return;
   }
   if (message.type === 'extraction-ready') {
-    await finishExtraction(message).catch(showError);
+    try {
+      await finishExtraction(message);
+    } catch (error) {
+      await failExtraction(message.jobId, error).catch(showError);
+      showError(error);
+    }
   }
 };
 
-async function register() {
-  saveInputs();
-  if (!state.session) parent.postMessage({ pluginMessage: { type: 'get-session' } }, '*');
-  await sleep(120);
-  const session = state.session || { fileName: 'Unknown', currentPageId: '', currentPageName: '', selectionCount: 0, capabilities: ['extract.selection'] };
-  const payload = { pluginSessionId: state.pluginSessionId, ...session };
-  const data = await postJson('/sessions/register', payload);
-  statusEl.textContent = `Registered ${data.session.pluginSessionId}; selection=${data.session.selectionCount}`;
-  log('Registered runtime session');
+requestSessionInfo();
+scheduleReconnect('startup', 0);
+
+function requestSessionInfo() {
+  parent.postMessage({ pluginMessage: { type: 'get-session' } }, '*');
 }
 
-async function connectEvents() {
-  saveInputs();
-  if (state.events) state.events.close();
-  const url = `${state.serviceUrl.replace(/\/$/, '')}/events?sessionId=${encodeURIComponent(state.pluginSessionId)}&token=${encodeURIComponent(state.token)}`;
-  state.events = new EventSource(url);
-  state.events.addEventListener('ready', () => log('Event stream ready'));
-  state.events.addEventListener('job.created', (event) => {
-    const data = JSON.parse(event.data);
-    log(`Job received: ${data.job.jobId} ${data.job.capability}`);
-    if (data.job.capability === 'extract.selection') {
-      parent.postMessage({ pluginMessage: { type: 'extract-selection', job: data.job } }, '*');
+function scheduleReconnect(reason, delayMs) {
+  if (state.reconnectTimer) clearTimeout(state.reconnectTimer);
+  const delay = typeof delayMs === 'number' ? delayMs : state.reconnectDelayMs;
+  state.reconnectTimer = setTimeout(function () {
+    state.reconnectTimer = null;
+    connectRuntime(reason).catch(handleConnectionError);
+  }, delay);
+}
+
+async function connectRuntime(reason) {
+  if (state.connecting) return;
+  state.connecting = true;
+  setStatus(`Connecting to runtime (${reason})`);
+  try {
+    if (!state.session) {
+      requestSessionInfo();
+      await sleep(150);
     }
+    await registerSession(false);
+    state.reconnectDelayMs = 1000;
+    startHeartbeat();
+    connectEvents();
+  } finally {
+    state.connecting = false;
+  }
+}
+
+async function registerSession(silent) {
+  const session = state.session || {
+    fileName: 'Unknown',
+    currentPageId: '',
+    currentPageName: '',
+    selectionCount: 0,
+    capabilities: ['extract.selection'],
+  };
+  const payload = {
+    pluginSessionId: state.pluginSessionId,
+    fileName: session.fileName,
+    currentPageId: session.currentPageId,
+    currentPageName: session.currentPageName,
+    selectionCount: session.selectionCount,
+    capabilities: session.capabilities || ['extract.selection'],
+  };
+  const data = await postJson('/sessions/register', payload);
+  state.registered = true;
+  if (!silent) {
+    setStatus(`Connected; selection=${data.session.selectionCount}`);
+    log('Registered runtime session automatically');
+  }
+  return data.session;
+}
+
+function connectEvents() {
+  if (state.events) state.events.close();
+  stopPolling();
+  const url = `${SERVICE_URL}/events?sessionId=${encodeURIComponent(state.pluginSessionId)}`;
+  log(`Connecting events: ${SERVICE_URL}`);
+  state.events = new EventSource(url);
+  state.events.addEventListener('ready', function () {
+    setStatus('Connected by event stream');
+    log('Event stream ready');
   });
-  state.events.addEventListener('job.canceled', (event) => log(`Job canceled: ${event.data}`));
-  state.events.onerror = () => log('Event stream error; check token and service URL');
+  state.events.addEventListener('ping', function () {});
+  state.events.addEventListener('job.created', function (event) {
+    const data = JSON.parse(event.data);
+    handleJob(data.job, 'received');
+  });
+  state.events.addEventListener('job.canceled', function (event) {
+    log(`Job canceled: ${event.data}`);
+  });
+  state.events.onerror = function () {
+    log(`Event stream unavailable; readyState=${state.events ? state.events.readyState : 'closed'}; using polling fallback`);
+    if (state.events) state.events.close();
+    state.events = null;
+    setStatus('Connected by polling fallback');
+    startPolling();
+  };
+}
+
+function startHeartbeat() {
+  if (state.heartbeatTimer) return;
+  state.heartbeatTimer = setInterval(function () {
+    registerSession(true).catch(function (error) {
+      log(`Runtime heartbeat failed: ${error.message || String(error)}`);
+      resetConnection();
+      handleConnectionError(error);
+    });
+  }, HEARTBEAT_MS);
+}
+
+function startPolling() {
+  if (state.pollTimer) return;
+  log(`Polling runtime jobs every ${POLL_MS / 1000}s`);
+  state.pollTimer = setInterval(function () {
+    pollJobs().catch(handleConnectionError);
+  }, POLL_MS);
+  pollJobs().catch(handleConnectionError);
+}
+
+function stopPolling() {
+  if (!state.pollTimer) return;
+  clearInterval(state.pollTimer);
+  state.pollTimer = null;
+}
+
+function stopHeartbeat() {
+  if (!state.heartbeatTimer) return;
+  clearInterval(state.heartbeatTimer);
+  state.heartbeatTimer = null;
+}
+
+async function pollJobs() {
+  const data = await getJson(`/jobs?sessionId=${encodeURIComponent(state.pluginSessionId)}&status=pending`);
+  const jobs = data.jobs || [];
+  for (const job of jobs) {
+    handleJob(job, 'polled');
+  }
+}
+
+function handleJob(job, source) {
+  if (!job || state.handledJobs[job.jobId]) return;
+  state.handledJobs[job.jobId] = true;
+  log(`Job ${source}: ${job.jobId} ${job.capability}`);
+  if (job.capability === 'extract.selection') {
+    parent.postMessage({ pluginMessage: { type: 'extract-selection', job } }, '*');
+  }
 }
 
 async function finishExtraction(message) {
@@ -119,11 +244,25 @@ async function finishExtraction(message) {
   log(`Extraction completed for job ${message.jobId}`);
 }
 
+async function failExtraction(jobId, error) {
+  if (!jobId) return;
+  const message = error && error.message ? error.message : String(error);
+  await postJson(`/jobs/${jobId}/result`, {
+    ok: false,
+    error: {
+      code: 'ARTIFACT_UPLOAD_FAILED',
+      message,
+      recoverable: true,
+      hint: 'Retry extraction with a smaller selection or fewer/lighter assets.',
+    },
+  });
+  log(`Extraction marked failed for job ${jobId}: ${message}`);
+}
+
 async function postJson(endpoint, body) {
-  saveInputs();
-  const response = await fetch(`${state.serviceUrl.replace(/\/$/, '')}${endpoint}`, {
+  const response = await fetch(`${SERVICE_URL}${endpoint}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${state.token}` },
+    headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   });
   const data = await response.json();
@@ -131,11 +270,28 @@ async function postJson(endpoint, body) {
   return data;
 }
 
-function saveInputs() {
-  state.serviceUrl = serviceUrlInput.value.trim() || 'http://127.0.0.1:39217';
-  state.token = tokenInput.value.trim();
-  localStorage.setItem('frr.serviceUrl', state.serviceUrl);
-  localStorage.setItem('frr.token', state.token);
+async function getJson(endpoint) {
+  const response = await fetch(`${SERVICE_URL}${endpoint}`, { method: 'GET' });
+  const data = await response.json();
+  if (!response.ok || data.ok === false) throw new Error(data.error ? data.error.message : `HTTP ${response.status}`);
+  return data;
+}
+
+function resetConnection() {
+  state.registered = false;
+  if (state.events) state.events.close();
+  state.events = null;
+  stopPolling();
+  stopHeartbeat();
+}
+
+function handleConnectionError(error) {
+  resetConnection();
+  const message = error.message || String(error);
+  setStatus(`Waiting for runtime at ${SERVICE_URL}`);
+  log(`Connection failed: ${message}; retrying`);
+  state.reconnectDelayMs = Math.min(Math.round(state.reconnectDelayMs * 1.6), 10000);
+  scheduleReconnect('retry', state.reconnectDelayMs);
 }
 
 function bytesToBase64(bytes) {
@@ -148,13 +304,27 @@ function bytesToBase64(bytes) {
   return btoa(binary);
 }
 
+function setStatus(message) {
+  statusEl.innerHTML = `<strong>${escapeHtml(message)}</strong>`;
+}
+
 function log(message) {
   const line = `[${new Date().toLocaleTimeString()}] ${message}`;
   logEl.textContent = `${line}\n${logEl.textContent}`.slice(0, 6000);
 }
 
 function showError(error) {
-  log(`ERROR: ${error.message || error}`);
+  const message = error.message || String(error);
+  setStatus('Error');
+  log(`ERROR: ${message}`);
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
 function sleep(ms) {

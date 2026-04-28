@@ -1,6 +1,5 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { randomBytes } from 'node:crypto';
 import { serviceLockSchema, type ServiceLock } from '../schema.js';
 import { nowIso } from '../ids.js';
 import { readJsonIfExists, writeJsonFile } from '../json.js';
@@ -8,11 +7,7 @@ import { DEFAULT_PORT, resolveArtifactRoot, resolveWorkspaceRoot, serviceLockPat
 
 export const SERVICE_VERSION = '0.1.0';
 
-export function createToken(): string {
-  return randomBytes(24).toString('base64url');
-}
-
-export function createServiceLock(options: { workspaceRoot?: string; artifactRoot?: string; port?: number; token?: string } = {}): ServiceLock {
+export function createServiceLock(options: { workspaceRoot?: string; artifactRoot?: string; port?: number } = {}): ServiceLock {
   const workspaceRoot = resolveWorkspaceRoot(options.workspaceRoot || process.cwd());
   const artifactRoot = path.resolve(options.artifactRoot || resolveArtifactRoot(workspaceRoot));
   const port = options.port || DEFAULT_PORT;
@@ -21,8 +16,7 @@ export function createServiceLock(options: { workspaceRoot?: string; artifactRoo
     version: SERVICE_VERSION,
     pid: process.pid,
     port,
-    url: `http://127.0.0.1:${port}`,
-    token: options.token || createToken(),
+    url: `http://localhost:${port}`,
     startedAt: nowIso(),
     workspaceRoot,
     artifactRoot,

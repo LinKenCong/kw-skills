@@ -161,6 +161,7 @@ export function sanitizeFileName(value: string): string {
 export function inferExtension(mediaType = '', fallback = 'bin'): string {
   if (mediaType.includes('png')) return 'png';
   if (mediaType.includes('jpeg') || mediaType.includes('jpg')) return 'jpg';
+  if (mediaType.includes('gif')) return 'gif';
   if (mediaType.includes('svg')) return 'svg';
   if (mediaType.includes('json')) return 'json';
   return fallback.replace(/^\./, '') || 'bin';

@@ -19,22 +19,21 @@ import { SERVICE_VERSION } from './lockfile.js';
 
 const MAX_JSON_BODY_BYTES = 35 * 1024 * 1024;
 const MAX_ARTIFACT_BYTES = 24 * 1024 * 1024;
-const ALLOWED_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/svg+xml', 'application/json', 'text/plain']);
+const ALLOWED_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/svg+xml', 'application/json', 'text/plain']);
 
 export function createRuntimeApp(state: RuntimeState): Hono {
   const app = new Hono();
 
-  app.use('*', bodyLimit({ maxSize: MAX_JSON_BODY_BYTES }));
   app.use('*', async (c, next) => {
-    if (c.req.path === '/health') return next();
-    const auth = c.req.header('authorization') || '';
-    const bearer = auth.startsWith('Bearer ') ? auth.slice('Bearer '.length) : '';
-    const queryToken = c.req.query('token') || '';
-    if (bearer !== state.token && queryToken !== state.token) {
-      return c.json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Missing or invalid runtime token' } }, 401);
-    }
+    c.header('access-control-allow-origin', '*');
+    c.header('access-control-allow-methods', 'GET,POST,OPTIONS');
+    c.header('access-control-allow-headers', 'content-type');
+    c.header('access-control-max-age', '600');
+    if (c.req.method === 'OPTIONS') return c.body(null, 204);
     return next();
   });
+
+  app.use('*', bodyLimit({ maxSize: MAX_JSON_BODY_BYTES }));
 
   app.onError((error, c) => {
     const status = error instanceof z.ZodError ? 400 : 500;
@@ -63,35 +62,12 @@ export function createRuntimeApp(state: RuntimeState): Hono {
     if (!state.sessions.has(sessionId)) {
       return c.json({ ok: false, error: { code: 'SESSION_NOT_FOUND', message: `Unknown session: ${sessionId}` } }, 404);
     }
-    const encoder = new TextEncoder();
-    let cleanup: (() => void) | undefined;
-    const stream = new ReadableStream<Uint8Array>({
-      start(controller) {
-        const subscriber = {
-          id: createId('sse'),
-          send(event: RuntimeEvent) {
-            controller.enqueue(encoder.encode(formatSse(event.type, event)));
-          },
-        };
-        const unsubscribe = state.subscribe(sessionId, subscriber);
-        controller.enqueue(encoder.encode(formatSse('ready', { ok: true, sessionId })));
-        const interval = setInterval(() => {
-          subscriber.send({ type: 'ping', time: new Date().toISOString() });
-        }, 15000);
-        cleanup = () => {
-          clearInterval(interval);
-          unsubscribe();
-        };
-      },
-      cancel() {
-        cleanup?.();
-      },
-    });
-    return new Response(stream, {
+    return new Response(createEventStream(state, sessionId), {
       headers: {
         'content-type': 'text/event-stream; charset=utf-8',
         'cache-control': 'no-cache, no-transform',
         connection: 'keep-alive',
+        'x-accel-buffering': 'no',
       },
     });
   });
@@ -104,6 +80,14 @@ export function createRuntimeApp(state: RuntimeState): Hono {
       ...(payload.sessionId ? { sessionId: payload.sessionId } : {}),
     });
     return c.json({ ok: true, job });
+  });
+
+  app.get('/jobs', (c) => {
+    const sessionId = c.req.query('sessionId');
+    const status = c.req.query('status');
+    let jobs = sessionId ? state.listJobsForSession(sessionId) : [...state.jobs.values()];
+    if (status) jobs = jobs.filter((job) => job.status === status);
+    return c.json({ ok: true, jobs });
   });
 
   app.get('/jobs/:jobId', (c) => {
@@ -122,7 +106,10 @@ export function createRuntimeApp(state: RuntimeState): Hono {
     const job = state.getJob(jobId);
     if (!job.runId) throw new Error(`Job has no run: ${jobId}`);
     const payload = artifactUploadSchema.parse(await c.req.json());
-    if (payload.mediaType && !ALLOWED_MEDIA_TYPES.has(payload.mediaType)) {
+    if (!payload.mediaType) {
+      return c.json({ ok: false, error: { code: 'MEDIA_TYPE_REQUIRED', message: 'Artifact mediaType is required' } }, 400);
+    }
+    if (!ALLOWED_MEDIA_TYPES.has(payload.mediaType)) {
       return c.json({ ok: false, error: { code: 'UNSUPPORTED_MEDIA_TYPE', message: `Unsupported media type: ${payload.mediaType}` } }, 400);
     }
     const buffer = Buffer.from(payload.dataBase64, 'base64');
@@ -173,6 +160,48 @@ export function createRuntimeApp(state: RuntimeState): Hono {
   return app;
 }
 
+function createEventStream(state: RuntimeState, sessionId: string): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  let cleanup: (() => void) | undefined;
+  let closed = false;
+  let controllerRef: ReadableStreamDefaultController<Uint8Array> | undefined;
+
+  const safeSend = (event: string, data: unknown) => {
+    if (closed || !controllerRef) return;
+    try {
+      controllerRef.enqueue(encoder.encode(formatSse(event, data)));
+    } catch (_error) {
+      closed = true;
+      cleanup?.();
+    }
+  };
+
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controllerRef = controller;
+      const subscriber = {
+        id: createId('sse'),
+        send(event: RuntimeEvent) {
+          safeSend(event.type, event);
+        },
+      };
+      const unsubscribe = state.subscribe(sessionId, subscriber);
+      safeSend('ready', { ok: true, sessionId });
+      const interval = setInterval(() => {
+        safeSend('ping', { type: 'ping', time: new Date().toISOString() });
+      }, 15000);
+      cleanup = () => {
+        clearInterval(interval);
+        unsubscribe();
+      };
+    },
+    cancel() {
+      closed = true;
+      cleanup?.();
+    },
+  });
+}
+
 function formatSse(event: string, data: unknown): string {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }
@@ -219,10 +248,15 @@ function attachArtifactPaths(extraction: RawExtraction, refs: ArtifactRef[]): Ra
   });
   const assets = extraction.assets.map((asset) => {
     const artifactId = asset.artifactId;
+    const fallbackArtifactId = asset.fallbackArtifactId;
     const ref = artifactId ? byId.get(artifactId) : undefined;
+    const fallbackRef = fallbackArtifactId ? byId.get(fallbackArtifactId) : undefined;
     return {
       ...asset,
       ...(ref?.path ? { path: ref.path } : {}),
+      ...(ref?.mediaType ? { mediaType: ref.mediaType } : {}),
+      ...(fallbackRef?.path ? { fallbackPath: fallbackRef.path } : {}),
+      ...(fallbackRef?.mediaType ? { fallbackMediaType: fallbackRef.mediaType } : {}),
     };
   });
   return { ...extraction, screenshots, assets };
