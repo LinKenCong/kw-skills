@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import path from 'node:path';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
 import { ArtifactStore } from '../artifact/store.js';
 import { buildMinimalDesignIr } from '../ir/build.js';
@@ -11,8 +13,9 @@ import { createRepairPlanFromFile } from '../restore/repair-plan.js';
 import { assertReactProjectRoot } from '../react/project.js';
 import { runRestoreAttempt } from '../restore/loop.js';
 import { startDevRuntimeService } from '../service/dev.js';
-import { readServiceLock } from '../service/lockfile.js';
+import { isServiceLockAlive, readServiceLock, removeServiceLock } from '../service/lockfile.js';
 import { startRuntimeService } from '../service/index.js';
+import { readServiceHealth, stopRuntimeService, validateServiceHealth } from '../service/control.js';
 import { createAgentBriefFromFiles, createCliSummary } from '../summary/agent-brief.js';
 import { runVerification } from '../verify/report.js';
 
@@ -36,10 +39,11 @@ program.command('doctor')
 const service = program.command('service').description('Runtime service commands');
 service.command('start')
   .option('--project <dir>', 'Workspace/project root', process.cwd())
+  .option('--silent', 'Do not print startup JSON')
   .action(wrap(async (options) => {
     const projectRoot = path.resolve(options.project);
     assertReactProjectRoot(projectRoot);
-    startRuntimeService({ workspaceRoot: projectRoot, port: DEFAULT_PORT });
+    startRuntimeService({ workspaceRoot: projectRoot, port: DEFAULT_PORT, silent: Boolean(options.silent) });
   }));
 service.command('dev')
   .description('Start runtime service with TypeScript watch rebuild and automatic service restart')
@@ -54,6 +58,20 @@ service.command('dev')
       compile: options.compile,
     });
   }));
+service.command('stop')
+  .description('Stop the runtime service for a project')
+  .option('--project <dir>', 'Workspace/project root', process.cwd())
+  .option('--force', 'Stop even when extraction jobs are active')
+  .option('--timeout <ms>', 'Health and shutdown timeout', parseIntOption, 5000)
+  .action(wrap(async (options) => {
+    const result = await stopRuntimeService({
+      projectRoot: path.resolve(options.project),
+      force: Boolean(options.force),
+      timeoutMs: Number(options.timeout),
+    });
+    printJson(result);
+    if (!result.ok) process.exitCode = 1;
+  }));
 
 program.command('sessions')
   .option('--project <dir>', 'Workspace/project root', process.cwd())
@@ -67,19 +85,44 @@ program.command('extract')
   .option('--project <dir>', 'Workspace/project root', process.cwd())
   .option('--session <id>', 'Plugin session id')
   .option('--timeout <ms>', 'Wait timeout', parseIntOption, 120000)
+  .option('--manage-service', 'Start the runtime service if needed and stop it when extraction finishes')
+  .option('--stop-service-after', 'Stop the runtime service after extraction finishes')
+  .option('--wait-session <ms>', 'Wait for a plugin session before creating the extraction job')
   .action(wrap(async (options) => {
-    const lock = requireLock(options.project);
-    const create = await serviceFetch(lock, '/jobs', {
-      method: 'POST',
-      body: {
-        capability: 'extract.selection',
-        ...(options.session ? { sessionId: options.session } : {}),
-        options: { screenshots: true, assets: true },
-      },
-    }) as { ok: boolean; job: { jobId: string } };
-    const job = await waitForJob(lock, create.job.jobId, Number(options.timeout));
-    printJson({ ok: true, runId: job.runId, job });
-    if (job.status !== 'completed') process.exitCode = 1;
+    const projectRoot = path.resolve(options.project);
+    const managed = Boolean(options.manageService);
+    const managedService = managed ? await ensureManagedService(projectRoot) : null;
+    const shouldStopService = Boolean(options.stopServiceAfter) || Boolean(managedService?.started);
+    let cleanupDone = false;
+    try {
+      const lock = managedService?.lock || requireLock(projectRoot);
+      const waitSessionMs = options.waitSession === undefined
+        ? (managed ? 60000 : 0)
+        : parseIntOption(String(options.waitSession));
+      if (waitSessionMs > 0) {
+        await waitForPluginSession(lock, { sessionId: options.session, timeoutMs: waitSessionMs });
+      }
+      const create = await serviceFetch(lock, '/jobs', {
+        method: 'POST',
+        body: {
+          capability: 'extract.selection',
+          ...(options.session ? { sessionId: options.session } : {}),
+          options: { screenshots: true, assets: true },
+        },
+      }) as { ok: boolean; job: { jobId: string } };
+      const job = await waitForJob(lock, create.job.jobId, Number(options.timeout));
+      const serviceStop = shouldStopService
+        ? await stopRuntimeService({ projectRoot, force: Boolean(managedService?.started), timeoutMs: 5000 })
+        : undefined;
+      cleanupDone = true;
+      printJson({ ok: job.status === 'completed' && (serviceStop ? serviceStop.ok : true), runId: job.runId, job, ...(serviceStop ? { serviceStop } : {}) });
+      if (job.status !== 'completed' || serviceStop?.ok === false) process.exitCode = 1;
+    } finally {
+      if (shouldStopService && !cleanupDone) {
+        const serviceStop = await stopRuntimeService({ projectRoot, force: Boolean(managedService?.started), timeoutMs: 5000 });
+        if (!serviceStop.ok) process.stderr.write(`[figma-react-restore] failed to stop runtime service: ${serviceStop.message}\n`);
+      }
+    }
   }));
 
 program.command('build-ir')
@@ -207,10 +250,100 @@ type ServiceJob = {
   error?: unknown;
 };
 
+type ManagedService = {
+  lock: ServiceLock;
+  started: boolean;
+  child?: ChildProcess;
+};
+
+type RuntimeSessionSummary = {
+  pluginSessionId: string;
+  connected?: boolean;
+};
+
 function requireLock(projectRoot: string): ServiceLock {
   const lock = readServiceLock(path.resolve(projectRoot));
   if (!lock) throw new Error('Runtime service is not running. Run figma-react-restore service start.');
   return lock;
+}
+
+async function ensureManagedService(projectRoot: string): Promise<ManagedService> {
+  const existing = await readUsableServiceLock(projectRoot);
+  if (existing) return { lock: existing, started: false };
+
+  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'service', 'start', '--project', projectRoot, '--silent'], {
+    cwd: projectRoot,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: process.env,
+  });
+  child.stdout?.on('data', (chunk) => process.stderr.write(String(chunk)));
+  child.stderr?.on('data', (chunk) => process.stderr.write(String(chunk)));
+  const cleanup = () => {
+    if (child.exitCode === null) child.kill('SIGTERM');
+  };
+  process.once('SIGINT', cleanup);
+  process.once('SIGTERM', cleanup);
+
+  try {
+    const lock = await waitForRuntimeService(projectRoot, child, 5000);
+    return { lock, started: true, child };
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
+}
+
+async function readUsableServiceLock(projectRoot: string): Promise<ServiceLock | null> {
+  const lock = readServiceLock(projectRoot);
+  if (!lock) return null;
+  try {
+    const health = await readServiceHealth(lock, 500);
+    const mismatch = validateServiceHealth(lock, health);
+    if (mismatch) throw new Error(mismatch);
+    return lock;
+  } catch (error) {
+    if (!isServiceLockAlive(lock)) {
+      removeServiceLock(projectRoot);
+      return null;
+    }
+    throw new Error(`Existing runtime service could not be verified: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function waitForRuntimeService(projectRoot: string, child: ChildProcess, timeoutMs: number): Promise<ServiceLock> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const lock = readServiceLock(projectRoot);
+    if (lock) {
+      try {
+        const health = await readServiceHealth(lock, 500);
+        const mismatch = validateServiceHealth(lock, health);
+        if (!mismatch) return lock;
+      } catch {
+        // Keep polling until the child exits or the timeout is reached.
+      }
+    }
+    if (child.exitCode !== null) throw new Error(`Managed runtime service exited before becoming healthy with code ${child.exitCode}`);
+    await delay(100);
+  }
+  throw new Error(`Timed out waiting for managed runtime service at http://localhost:${DEFAULT_PORT}`);
+}
+
+async function waitForPluginSession(lock: ServiceLock, options: { sessionId?: string; timeoutMs: number }): Promise<void> {
+  const deadline = Date.now() + options.timeoutMs;
+  while (Date.now() < deadline) {
+    const data = await serviceFetch(lock, '/sessions') as { sessions?: RuntimeSessionSummary[] };
+    const sessions = data.sessions || [];
+    const connected = sessions.filter((session) => session.connected);
+    if (options.sessionId) {
+      if (connected.some((session) => session.pluginSessionId === options.sessionId)) return;
+    } else if (connected.length > 0) {
+      return;
+    }
+    await delay(1000);
+  }
+  const target = options.sessionId ? `plugin session ${options.sessionId}` : 'a plugin session';
+  throw new Error(`Timed out waiting for ${target}. Open the Figma React Restore development plugin and keep it open.`);
 }
 
 async function serviceFetch(lock: ServiceLock, endpoint: string, options: { method?: string; body?: unknown } = {}): Promise<unknown> {
@@ -229,9 +362,13 @@ async function waitForJob(lock: ServiceLock, jobId: string, timeoutMs: number): 
   while (Date.now() < deadline) {
     const data = await serviceFetch(lock, `/jobs/${jobId}`) as { job: ServiceJob };
     if (data.job.status === 'completed' || data.job.status === 'failed' || data.job.status === 'canceled') return data.job;
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    await delay(1000);
   }
   throw new Error(`Timed out waiting for extraction job ${jobId}`);
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function printJson(data: unknown): void {

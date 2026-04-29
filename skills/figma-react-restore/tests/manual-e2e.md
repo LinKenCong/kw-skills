@@ -4,10 +4,10 @@ Use after automated tests pass.
 
 1. Run `npm install && npm run build` inside `skills/figma-react-restore`.
 2. Start a target React route, for example `tests/fixtures/react-vite` with `npm install && npm run dev`.
-3. Start runtime service from the target React project root, or pass it explicitly: `node <skill-dir>/dist/cli/index.js service start --project <react-project>`.
-4. In Figma Desktop, import `plugin/manifest.json`, select one frame, then open the development plugin. It should auto-connect to `http://localhost:49327` without token entry or Register/Event clicks.
+3. In Figma Desktop, import `plugin/manifest.json`, select one frame, then open the development plugin. It should auto-connect to `http://localhost:49327` after extraction starts, without token entry or Register/Event clicks.
    - This uses a development plugin and must not require Dev Mode, REST API access, Marketplace publishing, or plugin payments. Starter plan files should work; Organization or Enterprise files may still have seat/admin restrictions.
-5. Run `extract --selection`, `build-ir --run <runId> --route <route>`, then `restore --project <project> --route <route> --run <runId>`.
+4. Run `extract --selection --manage-service`, confirm the command stops its managed service after extraction, then run `build-ir --run <runId> --route <route>` and `restore --project <project> --route <route> --run <runId>`.
+5. If a manual service was used instead, run `service stop --project <react-project>` before build/restore and keep `.figma-react-restore/runs/<runId>/` intact.
 6. Confirm `.figma-react-restore/runs/<runId>/text-manifest.json` contains all visible Figma text, including deeply nested component text.
 7. Confirm `.figma-react-restore/runs/<runId>/restore/attempts/001/` contains `expected.png`, `actual.png`, `diff.png`, `trace.zip`, `report.json`, `repair-plan.json`, and `agent-brief.json`.
 8. Confirm `report.json` has `textResults`, and deliberate text mismatch produces `text-content` failures before typography/layout tuning.

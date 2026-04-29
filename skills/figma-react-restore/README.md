@@ -27,8 +27,9 @@ node dist/cli/index.js doctor
 figma-react-restore doctor
 figma-react-restore service start
 figma-react-restore service dev
+figma-react-restore service stop
 figma-react-restore sessions
-figma-react-restore extract --selection
+figma-react-restore extract --selection --manage-service
 figma-react-restore build-ir --run <runId>
 figma-react-restore verify --project . --route http://localhost:3000 --spec <spec>
 figma-react-restore repair-plan --report <report>
@@ -60,10 +61,12 @@ npm run dev:service -- --project <react-project>
 
 `service start` binds to the fixed local endpoint `http://localhost:49327`. The development plugin manifest and UI are intentionally pinned to this endpoint, so V1 does not expose a custom port in the CLI. It does not hot-reload the Figma plugin UI/main script; relaunch or re-import the development plugin after changing files under `plugin/`.
 
+The runtime service is needed only for Figma plugin registration and extraction. Prefer `extract --selection --manage-service` for normal use: it starts the service when needed, waits for a plugin session by default, and stops the service after extraction if it started it. If you started the service manually, run `figma-react-restore service stop --project <react-project>` after extraction completes; the run artifacts remain in `.figma-react-restore/runs/<runId>/` for build and verification.
+
 ## Figma plugin
 
 Import `plugin/manifest.json` in Figma Desktop via Plugins -> Development -> Import plugin from manifest.
 
-Start the runtime service first, then open the development plugin. The plugin auto-registers the current Figma session, uses EventSource when available, and falls back to polling without requiring token entry or Register/Event button clicks.
+For normal extraction, run `extract --selection --manage-service`, then open the development plugin if it is not already connected. The plugin auto-registers the current Figma session, uses EventSource when available, and falls back to polling without requiring token entry or Register/Event button clicks.
 
 The plugin is intentionally a local development plugin. It uses Figma Design plugin APIs and local-only `devAllowedDomains`; it does not require Dev Mode, REST API access, Marketplace publishing, or plugin payments. Starter plan files are supported; Organization or Enterprise files may still be subject to Figma seat/admin restrictions.

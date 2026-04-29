@@ -44,6 +44,9 @@ export function createRuntimeApp(state: RuntimeState): Hono {
     ok: true,
     service: 'figma-react-restore',
     version: SERVICE_VERSION,
+    pid: process.pid,
+    workspaceRoot: state.store.workspaceRoot,
+    artifactRoot: state.store.artifactRoot,
     pluginConnected: state.listSessions().some((session) => session.connected),
     activeJobs: state.activeJobCount(),
   }));

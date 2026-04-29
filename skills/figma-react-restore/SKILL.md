@@ -74,7 +74,8 @@ The artifact root belongs to the target React project root: `<react-project>/.fi
 The runtime service is only needed for Figma Desktop plugin connection and extraction. After `extract` finishes, `build-ir`, `verify`, `repair-plan`, `brief`, and `restore` read project artifacts directly and do not require the service.
 
 - start `figma-react-restore service start` only when a plugin session or extraction is needed; do not keep it running during React implementation or verification loops
-- keep a handle to the service process you start; avoid orphaning it with unmanaged `nohup`, detached shells, or background processes without cleanup
+- prefer `figma-react-restore extract --selection --manage-service`; it starts the service if needed, waits for a plugin session by default, and stops the service after extraction if it started it
+- if you manually start the service, keep a handle to the process and run `figma-react-restore service stop --project <react-project>` after extraction; avoid unmanaged `nohup`, detached shells, or background processes without cleanup
 - after `figma-react-restore extract --selection` returns a terminal job state, stop the service before running `build-ir`; keep `.figma-react-restore/runs/<runId>/` intact
 - if multiple immediate extractions are needed, keep the service only across those extraction commands, then stop it before code repair begins
 - if a service was already running before this task, do not terminate it unless the lockfile proves it is this project's `figma-react-restore` service and it is safe to close; otherwise report the existing service and leave it running
@@ -82,7 +83,7 @@ The runtime service is only needed for Figma Desktop plugin connection and extra
 ## Default Workflow
 
 1. Run `figma-react-restore doctor` from the React project root.
-2. Start the runtime service only for plugin connection and extraction:
+2. Start the runtime service only for plugin connection and extraction when you need a manual service:
    ```bash
    figma-react-restore service start
    ```
@@ -94,9 +95,9 @@ The runtime service is only needed for Figma Desktop plugin connection and extra
    ```
 5. Select one frame/component/region in Figma, then extract:
    ```bash
-   figma-react-restore extract --selection
+   figma-react-restore extract --selection --manage-service
    ```
-6. Stop the runtime service after extraction completes. Do not delete `.figma-react-restore/` here; the run artifacts are needed for build, verification, and user acceptance.
+6. Ensure the runtime service is stopped after extraction completes. `--manage-service` stops services it started; otherwise run `figma-react-restore service stop --project .`. Do not delete `.figma-react-restore/` here; the run artifacts are needed for build, verification, and user acceptance.
 7. Build restoration evidence:
    ```bash
    figma-react-restore build-ir --run <runId>

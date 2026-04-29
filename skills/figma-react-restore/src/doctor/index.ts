@@ -5,7 +5,8 @@ import { createRequire } from 'node:module';
 import { chromium } from 'playwright';
 import sharp from 'sharp';
 import { resolveArtifactRoot } from '../paths.js';
-import { readServiceLock } from '../service/lockfile.js';
+import { isServiceLockAlive, readServiceLock } from '../service/lockfile.js';
+import { readServiceHealth, validateServiceHealth } from '../service/control.js';
 import { inspectReactProject, waitForRoute } from '../react/project.js';
 
 export type DoctorCheck = {
@@ -121,20 +122,32 @@ async function checkService(projectRoot: string): Promise<DoctorCheck[]> {
     ];
   }
   try {
-    const response = await fetch(`${lock.url}/health`);
-    const data = await response.json() as { pluginConnected?: boolean };
+    const data = await readServiceHealth(lock);
+    const mismatch = validateServiceHealth(lock, data);
+    if (mismatch) {
+      return [
+        { name: 'runtime-service', ok: false, message: mismatch, fix: 'Run figma-react-restore service stop, then start a new extraction service' },
+        { name: 'plugin-session', ok: false, message: 'Runtime service identity is not verified, so plugin session cannot be checked', fix: 'Restart service, then reopen the Figma plugin if it does not reconnect automatically' },
+      ];
+    }
     return [
-      { name: 'runtime-service', ok: response.ok, message: response.ok ? 'Runtime service healthy' : `Runtime service returned HTTP ${response.status}` },
+      { name: 'runtime-service', ok: true, message: 'Runtime service healthy' },
       {
         name: 'plugin-session',
-        ok: response.ok && Boolean(data.pluginConnected),
-        message: response.ok && data.pluginConnected ? 'Figma plugin session is connected' : 'Figma plugin session is not connected',
-        ...(response.ok && data.pluginConnected ? {} : { fix: 'Open or reopen the Figma React Restore development plugin; it registers automatically' }),
+        ok: Boolean(data.pluginConnected),
+        message: data.pluginConnected ? 'Figma plugin session is connected' : 'Figma plugin session is not connected',
+        ...(data.pluginConnected ? {} : { fix: 'Open or reopen the Figma React Restore development plugin; it registers automatically' }),
       },
     ];
   } catch (error) {
+    const stale = !isServiceLockAlive(lock);
     return [
-      { name: 'runtime-service', ok: false, message: error instanceof Error ? error.message : String(error), fix: 'Restart figma-react-restore service start' },
+      {
+        name: 'runtime-service',
+        ok: false,
+        message: stale ? `Stale runtime service lockfile: ${error instanceof Error ? error.message : String(error)}` : error instanceof Error ? error.message : String(error),
+        fix: stale ? 'Run figma-react-restore service stop to remove the stale lockfile, then retry extraction' : 'Restart figma-react-restore service start',
+      },
       { name: 'plugin-session', ok: false, message: 'Runtime service is not reachable, so plugin session cannot be checked', fix: 'Restart service, then reopen the Figma plugin if it does not reconnect automatically' },
     ];
   }

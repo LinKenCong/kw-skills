@@ -39,8 +39,13 @@ async function createJob(app) {
 }
 
 test('service health and sessions are available for local plugin automation', async () => {
-  const { app } = makeApp();
-  assert.equal((await json(await app.request('/health'))).ok, true);
+  const { app, store } = makeApp();
+  const health = await json(await app.request('/health'));
+  assert.equal(health.ok, true);
+  assert.equal(health.service, 'figma-react-restore');
+  assert.equal(health.pid, process.pid);
+  assert.equal(health.workspaceRoot, store.workspaceRoot);
+  assert.equal(health.artifactRoot, store.artifactRoot);
   const sessions = await json(await app.request('/sessions'));
   assert.equal(sessions.ok, true);
   assert.deepEqual(sessions.sessions, []);
