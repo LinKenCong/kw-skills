@@ -69,10 +69,20 @@ The artifact root belongs to the target React project root: `<react-project>/.fi
 - `doctor` is a non-mutating preflight and must not create `.figma-react-restore`; the runtime creates it only when the service/run actually needs artifacts
 - if two `.figma-react-restore` folders appear, the one containing `service.json` or `runs/<runId>/run.json` is the active root; an empty sibling/parent folder is stale and should not be used
 
+## Runtime Service Lifecycle
+
+The runtime service is only needed for Figma Desktop plugin connection and extraction. After `extract` finishes, `build-ir`, `verify`, `repair-plan`, `brief`, and `restore` read project artifacts directly and do not require the service.
+
+- start `figma-react-restore service start` only when a plugin session or extraction is needed; do not keep it running during React implementation or verification loops
+- keep a handle to the service process you start; avoid orphaning it with unmanaged `nohup`, detached shells, or background processes without cleanup
+- after `figma-react-restore extract --selection` returns a terminal job state, stop the service before running `build-ir`; keep `.figma-react-restore/runs/<runId>/` intact
+- if multiple immediate extractions are needed, keep the service only across those extraction commands, then stop it before code repair begins
+- if a service was already running before this task, do not terminate it unless the lockfile proves it is this project's `figma-react-restore` service and it is safe to close; otherwise report the existing service and leave it running
+
 ## Default Workflow
 
 1. Run `figma-react-restore doctor` from the React project root.
-2. Start the runtime service if needed:
+2. Start the runtime service only for plugin connection and extraction:
    ```bash
    figma-react-restore service start
    ```
@@ -86,15 +96,16 @@ The artifact root belongs to the target React project root: `<react-project>/.fi
    ```bash
    figma-react-restore extract --selection
    ```
-6. Build restoration evidence:
+6. Stop the runtime service after extraction completes. Do not delete `.figma-react-restore/` here; the run artifacts are needed for build, verification, and user acceptance.
+7. Build restoration evidence:
    ```bash
    figma-react-restore build-ir --run <runId>
    ```
-7. Verify or restore the React route:
+8. Verify or restore the React route:
    ```bash
    figma-react-restore restore --project . --route http://localhost:3000 --run <runId> --max-iterations 3
    ```
-8. Read `agent-brief.json` and `text-manifest.json` first, patch the React code, then rerun `restore` until it passes or reports `blocked`.
+9. Read `agent-brief.json` and `text-manifest.json` first, patch the React code, then rerun `restore` until it passes or reports `blocked`.
 
 Token budget rule: for each repair round, read `agent-brief.json`, `text-manifest.json`, and the relevant React/CSS files first. Open `repair-plan.json`, `report.json`, or DesignIR only when a listed `nodeId`, `regionId`, `selector`, or evidence path is insufficient.
 
@@ -147,6 +158,16 @@ Stop and report the runtime status when it returns:
 - `blocked-environment`: fix browser, font, route, or dependency issues before editing code.
 - `blocked-no-improvement`: report the best attempt and plateau reason instead of continuing blindly.
 - `blocked-max-iterations`: report the latest repair plan and stop unless the user explicitly raises the iteration cap.
+
+## Final Cleanup Rule
+
+After final verification passes and the user confirms acceptance, automatically clean the project-scoped runtime artifacts and close any remaining local plugin runtime service. Do not ask for a second cleanup confirmation after acceptance.
+
+- the normal flow should already stop `figma-react-restore service start` or `figma-react-restore service dev` immediately after extraction; at final cleanup, close only a still-running service that was started for this task
+- if needed, terminate the `pid` in `<react-project>/.figma-react-restore/service.json` only after confirming it belongs to this project's `figma-react-restore` service
+- remove `<react-project>/.figma-react-restore/` after the service exits
+- never delete outside the active React project artifact root; do not clean before final verification and user acceptance because the artifacts are evidence
+- if cleanup is blocked by permissions or a non-owned/shared service, report the exact path or PID that still needs manual cleanup
 
 ## References
 
