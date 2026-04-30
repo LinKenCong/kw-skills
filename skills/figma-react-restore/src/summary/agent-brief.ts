@@ -81,6 +81,7 @@ export function createAgentBrief(options: AgentBriefOptions): AgentBrief {
     tokenPolicy: {
       readFirst: [
         'agent-brief.json',
+        'implementation-brief.json for structure tree, assets, tokens, component boundaries, and likely source files',
         'wrong-state failures and report.stateResults before changing layout/CSS',
         'text-manifest.json for exact Figma copy before editing visible text',
         'DOM mapping warnings before adding or moving data-figma-node attributes',

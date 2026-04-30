@@ -48,8 +48,11 @@ export type CapturedAssetUsage = {
   nodeId?: string;
   tagName: string;
   box: Box;
+  semanticKind?: 'image-src' | 'background-image' | 'css-mask' | 'inline-svg' | 'sprite-symbol' | 'icon-component';
   source?: string;
   backgroundImage?: string;
+  maskImage?: string;
+  spriteHref?: string;
 };
 
 export type BrowserCapture = {
@@ -424,14 +427,37 @@ async function captureWithBrowser(browser: Browser, options: {
         const image = element instanceof HTMLImageElement ? element : null;
         const source = image ? image.currentSrc || image.src || '' : '';
         const hasUrlBackground = /url\(/i.test(style.backgroundImage || '');
-        if (!source && !hasUrlBackground) return [];
+        const maskImage = (style.getPropertyValue('mask-image') || style.getPropertyValue('-webkit-mask-image') || '').trim();
+        const hasMask = /url\(/i.test(maskImage);
+        const use = element instanceof SVGUseElement ? element : element.querySelector('use');
+        const spriteHref = use?.getAttribute('href') || use?.getAttribute('xlink:href') || '';
+        const inlineSvg = element instanceof SVGSVGElement;
+        const className = typeof element.getAttribute('class') === 'string' ? element.getAttribute('class') || '' : '';
+        const iconComponent = /\b(icon|lucide|heroicon|tabler|phosphor|material-icons|fa-|bi-|ri-)\b/i.test(className)
+          || element.getAttribute('role') === 'img';
+        if (!source && !hasUrlBackground && !hasMask && !spriteHref && !inlineSvg && !iconComponent) return [];
+        const mappedNode = element.getAttribute('data-figma-node') || element.closest('[data-figma-node]')?.getAttribute('data-figma-node') || '';
+        const semanticKind = (source
+          ? 'image-src'
+          : hasUrlBackground
+            ? 'background-image'
+            : hasMask
+              ? 'css-mask'
+              : spriteHref
+                ? 'sprite-symbol'
+                : inlineSvg
+                  ? 'inline-svg'
+                  : 'icon-component') as 'image-src' | 'background-image' | 'css-mask' | 'inline-svg' | 'sprite-symbol' | 'icon-component';
         return [{
           selector: selectorFor(element),
-          ...(element.getAttribute('data-figma-node') ? { nodeId: element.getAttribute('data-figma-node') || '' } : {}),
+          ...(mappedNode ? { nodeId: mappedNode } : {}),
           tagName,
           box,
+          semanticKind,
           ...(source ? { source } : {}),
           ...(hasUrlBackground ? { backgroundImage: style.backgroundImage || '' } : {}),
+          ...(hasMask ? { maskImage } : {}),
+          ...(spriteHref ? { spriteHref } : {}),
         }];
       }).slice(0, 200);
       const viewportArea = Math.max(1, window.innerWidth * window.innerHeight);

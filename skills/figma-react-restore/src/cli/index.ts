@@ -19,7 +19,8 @@ import { isServiceLockAlive, readServiceLock, removeServiceLock } from '../servi
 import { startRuntimeService } from '../service/index.js';
 import { readServiceHealth, stopRuntimeService, validateServiceHealth } from '../service/control.js';
 import { createAgentBriefFromFiles, createCliSummary } from '../summary/agent-brief.js';
-import { runVerification } from '../verify/report.js';
+import { createImplementationBriefFromFiles } from '../summary/implementation-brief.js';
+import { runVerification, type ResponsiveViewportSpec } from '../verify/report.js';
 
 const program = new Command();
 
@@ -174,23 +175,34 @@ program.command('verify')
   .option('--cookie <name=value>', 'Cookie to set before route load; repeatable', collectOption, [])
   .option('--setup-script <js>', 'JavaScript setup script injected before route load')
   .option('--state-json <path>', 'Route state contract JSON to merge at verify time')
+  .option('--responsive-smoke', 'Run opt-in mobile/tablet responsive smoke captures')
+  .option('--responsive-viewport <spec>', 'Responsive smoke viewport name:WIDTHxHEIGHT[@DPR]; repeatable', collectOption, [])
   .option('--full-report', 'Print full verify report instead of token-optimized summary')
   .action(wrap(async (options) => {
     const routeState = routeStateFromCliOptions(options);
+    const responsiveViewports = parseResponsiveViewportOptions(stringArray(options.responsiveViewport));
     const verifyOptions = {
       projectRoot: path.resolve(options.project),
       route: options.route,
       specPath: path.resolve(options.spec),
       waitMs: Number(options.waitMs),
       ...(routeState ? { routeState } : {}),
+      ...(Boolean(options.responsiveSmoke) ? { responsiveSmoke: true } : {}),
+      ...(responsiveViewports.length > 0 ? { responsiveViewports } : {}),
       ...(options.outputDir ? { outputDir: path.resolve(options.outputDir) } : {}),
     };
     const result = await runVerification(verifyOptions);
     const { brief, briefPath } = createAgentBriefFromFiles({ reportPath: result.reportPath });
+    const { briefPath: implementationBriefPath } = createImplementationBriefFromFiles({
+      reportPath: result.reportPath,
+      agentBriefPath: briefPath,
+      projectRoot: path.resolve(options.project),
+    });
     printJson({
       ok: result.report.status === 'passed',
       reportPath: result.reportPath,
       briefPath,
+      implementationBriefPath,
       summary: createCliSummary(brief),
       ...(options.fullReport ? { report: result.report } : {}),
     });
@@ -199,16 +211,23 @@ program.command('verify')
 
 program.command('repair-plan')
   .requiredOption('--report <path>', 'Verify report JSON path')
+  .option('--project <dir>', 'React project root for source ownership discovery')
   .option('--output <path>', 'Repair plan output path')
   .option('--full-plan', 'Print full repair plan instead of token-optimized summary')
   .action(wrap(async (options) => {
     const reportPath = path.resolve(options.report);
     const { plan, planPath } = createRepairPlanFromFile(reportPath, options.output ? path.resolve(options.output) : undefined);
     const { brief, briefPath } = createAgentBriefFromFiles({ reportPath, planPath });
+    const { briefPath: implementationBriefPath } = createImplementationBriefFromFiles({
+      reportPath,
+      agentBriefPath: briefPath,
+      ...(options.project ? { projectRoot: path.resolve(options.project) } : {}),
+    });
     printJson({
       ok: plan.status !== 'blocked',
       planPath,
       briefPath,
+      implementationBriefPath,
       summary: createCliSummary(brief),
       ...(options.fullPlan ? { plan } : {}),
     });
@@ -220,6 +239,8 @@ program.command('brief')
   .requiredOption('--report <path>', 'Verify report JSON path')
   .option('--plan <path>', 'Repair plan JSON path; defaults to sibling repair-plan.json when present')
   .option('--output <path>', 'Agent brief output path; defaults to sibling agent-brief.json')
+  .option('--project <dir>', 'React project root for implementation brief source ownership discovery')
+  .option('--implementation-output <path>', 'Implementation brief output path; defaults to sibling implementation-brief.json')
   .option('--max-failures <count>', 'Maximum top failures to include', parseIntOption, 10)
   .action(wrap(async (options) => {
     const { brief, briefPath } = createAgentBriefFromFiles({
@@ -228,7 +249,13 @@ program.command('brief')
       ...(options.output ? { outputPath: path.resolve(options.output) } : {}),
       maxFailures: Number(options.maxFailures),
     });
-    printJson({ ok: true, briefPath, summary: createCliSummary(brief) });
+    const { briefPath: implementationBriefPath } = createImplementationBriefFromFiles({
+      reportPath: path.resolve(options.report),
+      agentBriefPath: briefPath,
+      ...(options.implementationOutput ? { outputPath: path.resolve(options.implementationOutput) } : {}),
+      ...(options.project ? { projectRoot: path.resolve(options.project) } : {}),
+    });
+    printJson({ ok: true, briefPath, implementationBriefPath, summary: createCliSummary(brief) });
   }));
 
 program.command('restore')
@@ -238,8 +265,11 @@ program.command('restore')
   .option('--dev-command <cmd>', 'Command to start the React dev server')
   .option('--max-iterations <count>', 'Maximum restore attempts before blocking', parseIntOption, 3)
   .option('--wait-ms <ms>', 'Extra wait before screenshot', parseIntOption, 0)
+  .option('--responsive-smoke', 'Run opt-in mobile/tablet responsive smoke captures on each attempt')
+  .option('--responsive-viewport <spec>', 'Responsive smoke viewport name:WIDTHxHEIGHT[@DPR]; repeatable', collectOption, [])
   .action(wrap(async (options) => {
     const projectRoot = path.resolve(options.project);
+    const responsiveViewports = parseResponsiveViewportOptions(stringArray(options.responsiveViewport));
     const result = await runRestoreAttempt({
       projectRoot,
       route: options.route,
@@ -247,6 +277,8 @@ program.command('restore')
       devCommand: options.devCommand,
       maxIterations: Number(options.maxIterations),
       waitMs: Number(options.waitMs),
+      responsiveSmoke: Boolean(options.responsiveSmoke),
+      ...(responsiveViewports.length > 0 ? { responsiveViewports } : {}),
     }, new ArtifactStore({ workspaceRoot: projectRoot }));
     printJson({ ok: result.status === 'passed', ...result });
     if (result.status !== 'passed') process.exitCode = 1;
@@ -458,6 +490,23 @@ function parseViewport(value: string | undefined, dpr: number): { width?: number
   const match = /^(\d+)x(\d+)$/i.exec(value.trim());
   if (!match) throw new Error('Viewport must be WIDTHxHEIGHT, for example 1440x900');
   return { width: Number(match[1]), height: Number(match[2]), dpr };
+}
+
+function parseResponsiveViewportOptions(values: string[]): ResponsiveViewportSpec[] {
+  return values.map(parseResponsiveViewportOption);
+}
+
+export function parseResponsiveViewportOption(value: string): ResponsiveViewportSpec {
+  const match = /^([a-zA-Z0-9._-]+):(\d+)x(\d+)(?:@([0-9]+(?:\.[0-9]+)?))?$/.exec(value.trim());
+  if (!match) throw new Error('Responsive viewport must be name:WIDTHxHEIGHT[@DPR], for example mobile:390x844@2');
+  return {
+    name: match[1]!,
+    viewport: {
+      width: Number(match[2]),
+      height: Number(match[3]),
+      dpr: match[4] ? Number(match[4]) : 1,
+    },
+  };
 }
 
 function routeStateFromCliOptions(options: Record<string, unknown>): RouteStateContract | undefined {

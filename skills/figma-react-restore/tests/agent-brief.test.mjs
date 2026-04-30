@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { createAgentBrief, createAgentBriefFromFiles, createCliSummary } from '../dist/summary/agent-brief.js';
+import { createImplementationBriefFromFiles } from '../dist/summary/implementation-brief.js';
 
 const baseReport = {
   schemaVersion: 1,
@@ -124,4 +125,62 @@ test('agent brief file writer resolves text manifest from report run id', () => 
   fs.writeFileSync(reportPath, JSON.stringify({ ...baseReport, runId: 'run_1' }));
   const { brief } = createAgentBriefFromFiles({ reportPath });
   assert.equal(brief.artifactPaths.textManifestPath, textManifestPath);
+});
+
+test('implementation brief writes structure, asset policy, tokens, and likely files', () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'frr-impl-brief-'));
+  const projectRoot = path.join(workspace, 'project');
+  const root = path.join(projectRoot, '.figma-react-restore');
+  const runDir = path.join(root, 'runs', 'run_1');
+  const verifyDir = path.join(root, 'verify', 'attempt_1');
+  fs.mkdirSync(path.join(projectRoot, 'app', 'landing'), { recursive: true });
+  fs.mkdirSync(path.join(projectRoot, 'src', 'styles'), { recursive: true });
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.mkdirSync(verifyDir, { recursive: true });
+  fs.writeFileSync(path.join(projectRoot, 'package.json'), JSON.stringify({
+    scripts: { dev: 'next dev' },
+    dependencies: { react: '^18.0.0', next: '^15.0.0' },
+  }));
+  fs.writeFileSync(path.join(projectRoot, 'app', 'landing', 'page.tsx'), 'export default function Page() { return null; }');
+  fs.writeFileSync(path.join(projectRoot, 'tailwind.config.ts'), 'export default {};');
+  fs.writeFileSync(path.join(projectRoot, 'src', 'styles', 'tokens.css'), ':root { --brand: #111; }');
+  const designIr = {
+    schemaVersion: 1,
+    runId: 'run_1',
+    evidenceLevel: 'L3-structured',
+    page: { pageName: 'Landing', width: 1200, height: 900 },
+    regions: [
+      { regionId: 'page', nodeId: 'page', name: 'Landing Page', kind: 'page', box: { x: 0, y: 0, w: 1200, h: 900 }, strictness: 'layout', mapping: 'optional' },
+      { regionId: 'hero', nodeId: 'hero', name: 'Hero Section', kind: 'section', box: { x: 0, y: 0, w: 1200, h: 520 }, strictness: 'layout', mapping: 'optional' },
+      { regionId: 'icon', nodeId: 'icon', name: 'Search Icon', kind: 'image', box: { x: 80, y: 80, w: 24, h: 24 }, strictness: 'strict', mapping: 'required' },
+      { regionId: 'photo', nodeId: 'photo', name: 'Product Photo', kind: 'image', box: { x: 720, y: 80, w: 360, h: 300 }, strictness: 'strict', mapping: 'required' },
+    ],
+    texts: [{ nodeId: 'title', name: 'Title', text: 'Launch faster', box: { x: 80, y: 120, w: 400, h: 80 }, fontFamily: 'Staatliches', fontSize: 48, fontWeight: 700 }],
+    assets: [
+      { artifactId: 'asset_icon', nodeId: 'icon', path: 'runs/run_1/assets/search.svg', kind: 'svg', preferredFormat: 'svg', allowedUse: 'implementation', sourceKind: 'vector' },
+      { artifactId: 'asset_photo', nodeId: 'photo', path: 'runs/run_1/assets/product.png', kind: 'image', preferredFormat: 'png', allowedUse: 'implementation', sourceKind: 'image-fill' },
+    ],
+    colors: [{ value: '#111111', count: 4 }],
+    typography: [{ nodeId: 'title', fontFamily: 'Staatliches', fontSize: 48, fontWeight: 700 }],
+    layoutHints: [
+      { nodeId: 'page', name: 'Landing Page', display: 'flex', direction: 'column', gap: 0, box: { x: 0, y: 0, w: 1200, h: 900 } },
+      { nodeId: 'hero', parentNodeId: 'page', name: 'Hero Section', display: 'flex', direction: 'row', gap: 48, padding: [80, 80, 80, 80], box: { x: 0, y: 0, w: 1200, h: 520 } },
+    ],
+    warnings: [],
+  };
+  const reportPath = path.join(verifyDir, 'report.json');
+  fs.writeFileSync(path.join(runDir, 'design-ir.json'), JSON.stringify(designIr));
+  fs.writeFileSync(path.join(runDir, 'text-manifest.json'), JSON.stringify({ schemaVersion: 1, kind: 'text-manifest', runId: 'run_1', source: 'figma-text-nodes', textCount: 1, items: designIr.texts, warnings: [] }));
+  fs.writeFileSync(reportPath, JSON.stringify({ ...baseReport, runId: 'run_1', route: 'http://localhost:3000/landing' }));
+
+  const { brief, briefPath } = createImplementationBriefFromFiles({ reportPath, projectRoot });
+
+  assert.ok(fs.existsSync(briefPath));
+  assert.equal(brief.kind, 'implementation-brief');
+  assert.equal(brief.structureTree[0].nodeId, 'page');
+  assert.equal(brief.assetManifest.summary.semanticEquivalentAllowed, 1);
+  assert.equal(brief.assetManifest.summary.mustUseExtractedAsset, 1);
+  assert.ok(brief.tokens.spacing.includes(48));
+  assert.ok(brief.likelySourceFiles.some((file) => file.path === 'app/landing/page.tsx'));
+  assert.equal(brief.responsive.smokeStatus, 'not-run');
 });

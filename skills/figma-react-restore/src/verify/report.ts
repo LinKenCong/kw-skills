@@ -25,8 +25,38 @@ import {
   type VerifyReport,
   type Warning,
 } from '../schema.js';
+import { assetImplementationPolicy, hasSemanticAssetEquivalence } from './assets.js';
 import { captureRoute, type CapturedAssetUsage, type CapturedDomNode } from './capture.js';
 import { compareImages, cropImage } from './pixel.js';
+
+export type ResponsiveViewportSpec = {
+  name: string;
+  viewport: {
+    width: number;
+    height: number;
+    dpr: number;
+  };
+};
+
+export type ResponsiveSmokeReport = {
+  schemaVersion: 1;
+  kind: 'responsive-smoke';
+  route: string;
+  status: 'passed' | 'failed';
+  viewports: Array<{
+    name: string;
+    viewport: ResponsiveViewportSpec['viewport'];
+    status: 'passed' | 'failed';
+    screenshotPath?: string;
+    overflowIssueCount: number;
+    missingAssetCount: number;
+    rasterOverlayIssueCount: number;
+    failedRequestCount: number;
+    failedStateCount: number;
+    error?: string;
+  }>;
+  warnings: Warning[];
+};
 
 export type VerifyOptions = {
   projectRoot: string;
@@ -36,6 +66,8 @@ export type VerifyOptions = {
   attemptId?: string;
   waitMs?: number;
   routeState?: RouteStateContract;
+  responsiveSmoke?: boolean;
+  responsiveViewports?: ResponsiveViewportSpec[];
 };
 
 export async function runVerification(options: VerifyOptions): Promise<{ report: VerifyReport; reportPath: string }> {
@@ -143,7 +175,7 @@ export async function runVerification(options: VerifyOptions): Promise<{ report:
     });
   }
 
-  failures.push(...buildAssetUsageFailures(spec.assets || [], capture.assetUsages));
+  failures.push(...buildAssetUsageFailures(spec.assets || [], capture.assetUsages, { regions: spec.regions, regionResults, domResults }));
 
   for (const issue of capture.rasterOverlayIssues) {
     failures.push({
@@ -176,6 +208,21 @@ export async function runVerification(options: VerifyOptions): Promise<{ report:
       expected: { path: relativeArtifactPath(artifactRoot, expectedPath) },
       actual: { path: relativeArtifactPath(artifactRoot, actualPath) },
     });
+  }
+
+  if (options.responsiveSmoke || (options.responsiveViewports && options.responsiveViewports.length > 0)) {
+    const responsiveSmoke = await runResponsiveSmoke({
+      route: options.route || spec.route,
+      artifactRoot,
+      outputDir,
+      ...(routeState ? { routeState } : {}),
+      ...(options.waitMs !== undefined ? { waitMs: options.waitMs } : {}),
+      viewports: options.responsiveViewports && options.responsiveViewports.length > 0
+        ? options.responsiveViewports
+        : defaultResponsiveSmokeViewports(),
+    });
+    warnings.push(...responsiveSmoke.warnings);
+    failures.push(...buildResponsiveSmokeFailures(responsiveSmoke));
   }
 
   if (spec.evidenceLevel === 'L1-visual-only' || spec.evidenceLevel === 'L0-blocked' || spec.regions.length === 0) {
@@ -324,6 +371,112 @@ export function addVerifyReportArtifact(store: ArtifactStore, runId: string, rep
     kind: 'verify-report',
     path: relative,
     mediaType: 'application/json',
+  });
+}
+
+export function defaultResponsiveSmokeViewports(): ResponsiveViewportSpec[] {
+  return [
+    { name: 'mobile', viewport: { width: 390, height: 844, dpr: 2 } },
+    { name: 'tablet', viewport: { width: 768, height: 1024, dpr: 1 } },
+  ];
+}
+
+async function runResponsiveSmoke(options: {
+  route: string;
+  routeState?: RouteStateContract;
+  waitMs?: number;
+  artifactRoot: string;
+  outputDir: string;
+  viewports: ResponsiveViewportSpec[];
+}): Promise<ResponsiveSmokeReport> {
+  const responsiveDir = path.join(options.outputDir, 'responsive');
+  fs.mkdirSync(responsiveDir, { recursive: true });
+  const viewports: ResponsiveSmokeReport['viewports'] = [];
+  const warnings: Warning[] = [];
+  for (const item of options.viewports) {
+    const safeName = item.name.replace(/[^a-zA-Z0-9._-]+/g, '-');
+    const screenshotPath = path.join(responsiveDir, `${safeName}.actual.png`);
+    try {
+      const capture = await captureRoute({
+        route: options.route,
+        viewport: item.viewport,
+        outputPath: screenshotPath,
+        ...(options.waitMs !== undefined ? { waitMs: options.waitMs } : {}),
+        ...(options.routeState ? { routeState: options.routeState } : {}),
+      });
+      const failedStateCount = capture.stateResults.filter((result) => result.status === 'failed').length;
+      const status = capture.overflowIssues.length > 0
+        || capture.missingAssets.length > 0
+        || capture.rasterOverlayIssues.length > 0
+        || capture.failedRequests.length > 0
+        || failedStateCount > 0
+        ? 'failed'
+        : 'passed';
+      viewports.push({
+        name: item.name,
+        viewport: item.viewport,
+        status,
+        screenshotPath: relativeArtifactPath(options.artifactRoot, screenshotPath),
+        overflowIssueCount: capture.overflowIssues.length,
+        missingAssetCount: capture.missingAssets.length,
+        rasterOverlayIssueCount: capture.rasterOverlayIssues.length,
+        failedRequestCount: capture.failedRequests.length,
+        failedStateCount,
+      });
+    } catch (error) {
+      viewports.push({
+        name: item.name,
+        viewport: item.viewport,
+        status: 'failed',
+        overflowIssueCount: 0,
+        missingAssetCount: 0,
+        rasterOverlayIssueCount: 0,
+        failedRequestCount: 0,
+        failedStateCount: 0,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  const status = viewports.some((item) => item.status === 'failed') ? 'failed' : 'passed';
+  warnings.push({
+    code: status === 'passed' ? 'RESPONSIVE_SMOKE_PASSED' : 'RESPONSIVE_SMOKE_FAILED',
+    message: status === 'passed'
+      ? 'Opt-in responsive smoke passed for configured mobile/tablet viewport(s).'
+      : 'Opt-in responsive smoke found route-state, overflow, missing asset, request, or overlay issues.',
+    hint: 'Responsive smoke is not a Figma visual diff; add viewport-specific baselines later if exact multi-breakpoint visual gates are needed.',
+  });
+  const report: ResponsiveSmokeReport = {
+    schemaVersion: 1,
+    kind: 'responsive-smoke',
+    route: options.route,
+    status,
+    viewports,
+    warnings,
+  };
+  writeJsonFile(path.join(options.outputDir, 'responsive-smoke.json'), report);
+  return report;
+}
+
+function buildResponsiveSmokeFailures(report: ResponsiveSmokeReport): Failure[] {
+  return report.viewports.flatMap((viewport) => {
+    if (viewport.status === 'passed') return [];
+    const actual = {
+      viewport: viewport.viewport,
+      screenshotPath: viewport.screenshotPath || '',
+      overflowIssueCount: viewport.overflowIssueCount,
+      missingAssetCount: viewport.missingAssetCount,
+      rasterOverlayIssueCount: viewport.rasterOverlayIssueCount,
+      failedRequestCount: viewport.failedRequestCount,
+      failedStateCount: viewport.failedStateCount,
+      ...(viewport.error ? { error: viewport.error } : {}),
+    };
+    return [{
+      failureId: createId('failure'),
+      category: viewport.error ? 'blocked-environment' as const : viewport.failedStateCount > 0 ? 'wrong-state' as const : viewport.missingAssetCount > 0 ? 'asset-missing' as const : 'overflow-clipping' as const,
+      severity: viewport.error ? 'medium' as const : 'low' as const,
+      message: `Responsive smoke failed for ${viewport.name} viewport`,
+      actual,
+    }];
   });
 }
 
@@ -589,10 +742,15 @@ function stateFailureSeverity(result: StateResult): Failure['severity'] {
   return 'medium';
 }
 
-export function buildAssetUsageFailures(assets: AssetEvidence[], usages: CapturedAssetUsage[]): Failure[] {
+export function buildAssetUsageFailures(assets: AssetEvidence[], usages: CapturedAssetUsage[], context: {
+  regions?: Region[];
+  regionResults?: RegionResult[];
+  domResults?: DomResult[];
+} = {}): Failure[] {
   const failures: Failure[] = [];
   for (const asset of assets) {
     if (asset.kind === 'screenshot' || asset.kind === 'unknown') continue;
+    const policy = assetImplementationPolicy(asset, context);
     const expectedRefs = [asset.path, asset.fallbackPath].filter((item): item is string => Boolean(item));
     const expectedNames = expectedRefs.map((ref) => path.basename(ref)).filter(Boolean);
     const matchingBySource = usages.filter((usage) => expectedNames.some((name) => usageContains(usage, name)));
@@ -616,14 +774,21 @@ export function buildAssetUsageFailures(assets: AssetEvidence[], usages: Capture
       });
       continue;
     }
+    if (policy === 'semantic-equivalent-allowed' && hasSemanticAssetEquivalence(asset, context)) continue;
     if (expectedRefs.length === 0) {
       failures.push({
         failureId: createId('failure'),
         category: 'asset-missing',
         severity: 'high',
-        message: 'Figma asset evidence is missing an extracted file path; re-extract instead of drawing or inventing this image.',
+        message: policy === 'semantic-equivalent-allowed'
+          ? 'Semantic-equivalent icon/vector asset has no extracted file and did not meet equivalence conditions. Map the DOM node and keep its region visual check passing, or re-extract the asset.'
+          : 'Figma asset evidence is missing an extracted file path; re-extract instead of drawing or inventing this image.',
         ...(asset.nodeId ? { nodeId: asset.nodeId } : {}),
-        expected: { artifactId: asset.artifactId || '', fallbackArtifactId: asset.fallbackArtifactId || '' },
+        expected: {
+          artifactId: asset.artifactId || '',
+          fallbackArtifactId: asset.fallbackArtifactId || '',
+          policy,
+        },
       });
       continue;
     }
@@ -632,11 +797,14 @@ export function buildAssetUsageFailures(assets: AssetEvidence[], usages: Capture
       failureId: createId('failure'),
       category: 'asset-missing',
       severity: 'high',
-      message: 'Expected extracted Figma image/vector asset is not used in the rendered page. Do not draw or recreate missing images; use the extracted asset or re-extract from Figma.',
+      message: policy === 'semantic-equivalent-allowed'
+        ? 'Icon/vector asset may use a semantic equivalent, but this render lacks the required node mapping plus passing region visual evidence. Use an existing icon component/inline SVG/CSS mask/sprite with data-figma-node and passing region visual check, or use the extracted asset.'
+        : 'Expected extracted Figma image/photo/logo asset is not used in the rendered page. Do not draw or recreate missing images; use the extracted asset or re-extract from Figma.',
       ...(asset.nodeId ? { nodeId: asset.nodeId, selector: `[data-figma-node="${asset.nodeId}"]` } : {}),
-      expected: { paths: expectedRefs },
+      expected: { paths: expectedRefs, policy },
       actual: {
         matchedNodeAssetSources: matchingByNode.map((usage) => compactUsageSource(usage)).filter(Boolean).slice(0, 5),
+        matchedNodeSemanticKinds: matchingByNode.map((usage) => usage.semanticKind).filter(Boolean).slice(0, 5),
       },
     });
   }
@@ -644,7 +812,7 @@ export function buildAssetUsageFailures(assets: AssetEvidence[], usages: Capture
 }
 
 function usageContains(usage: CapturedAssetUsage, expectedName: string): boolean {
-  const sources = [usage.source, usage.backgroundImage].filter((item): item is string => Boolean(item));
+  const sources = [usage.source, usage.backgroundImage, usage.maskImage, usage.spriteHref].filter((item): item is string => Boolean(item));
   return sources.some((source) => decodeSource(source).includes(expectedName));
 }
 
@@ -657,7 +825,7 @@ function decodeSource(source: string): string {
 }
 
 function compactUsageSource(usage: CapturedAssetUsage): string {
-  return (usage.source || usage.backgroundImage || '').slice(0, 240);
+  return (usage.source || usage.backgroundImage || usage.maskImage || usage.spriteHref || usage.semanticKind || '').slice(0, 240);
 }
 
 function buildStyleFailures(spec: FidelitySpec, domResults: DomResult[]): Failure[] {

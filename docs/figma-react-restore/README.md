@@ -24,7 +24,8 @@
 - Runtime：Node.js 执行构建产物。
 - Service：Hono + `@hono/node-server`。
 - 常驻服务数量：1 个 runtime service。
-- Agent 默认读取：`agent-brief.json` 和 `text-manifest.json`；按需读取完整 report / repair-plan / DesignIR。
+- Agent 默认读取：`agent-brief.json`、`implementation-brief.json` 和 `text-manifest.json`；按需读取完整 report / repair-plan / DesignIR。
+- `implementation-brief.json` 面向从 0 到 1 的前端实现，汇总 structure tree、key sections、asset policy、tokens/layout constraints、component boundaries 和 likely source files。
 - Bun binary：后续分发优化，不作为 V1 前提。
 - 目标项目：已有 React 类项目。
 - V1 不内置完整 codegen；Agent 根据 `repair-plan.json` 修改 React 代码。
