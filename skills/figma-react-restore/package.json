@@ -9,6 +9,7 @@
   "files": [
     "dist/",
     "plugin/",
+    "references/",
     "README.md",
     "SKILL.md"
   ],
