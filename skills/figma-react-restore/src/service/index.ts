@@ -18,9 +18,9 @@ export function startRuntimeService(options: StartServiceOptions = {}): void {
   const store = new ArtifactStore({ workspaceRoot: lock.workspaceRoot, artifactRoot: lock.artifactRoot });
   store.ensure();
   writeServiceLock(lock);
-  const state = new RuntimeState({ store });
+  const state = new RuntimeState({ store, adminToken: lock.adminToken });
   const app = createRuntimeApp(state);
-  const server = serve({ fetch: app.fetch, port });
+  const server = serve({ fetch: app.fetch, port, hostname: '127.0.0.1' });
 
   const cleanup = () => {
     removeServiceLock(lock.workspaceRoot);

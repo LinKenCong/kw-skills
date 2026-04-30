@@ -1,5 +1,6 @@
 import path from 'node:path';
-import { Hono } from 'hono';
+import { timingSafeEqual } from 'node:crypto';
+import { Hono, type Context } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
 import { createId } from '../ids.js';
@@ -14,21 +15,39 @@ import {
   type RawExtraction,
 } from '../schema.js';
 import { inferExtension, sanitizeFileName } from '../artifact/store.js';
-import type { RuntimeEvent, RuntimeState } from './state.js';
+import { RuntimeStateError, type RuntimeEvent, type RuntimeJob, type RuntimeState } from './state.js';
 import { SERVICE_VERSION } from './lockfile.js';
 
 const MAX_JSON_BODY_BYTES = 35 * 1024 * 1024;
 const MAX_ARTIFACT_BYTES = 24 * 1024 * 1024;
 const ALLOWED_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/svg+xml', 'application/json', 'text/plain']);
+const ADMIN_TOKEN_HEADER = 'x-frr-admin-token';
+const JOB_SECRET_HEADER = 'x-frr-job-secret';
+const PLUGIN_SESSION_HEADER = 'x-frr-plugin-session-id';
+const ALLOWED_BROWSER_ORIGINS = new Set(['null', 'https://www.figma.com', 'https://figma.com']);
+const CORS_ALLOW_HEADERS = [
+  'content-type',
+  ADMIN_TOKEN_HEADER,
+  JOB_SECRET_HEADER,
+  PLUGIN_SESSION_HEADER,
+].join(', ');
 
 export function createRuntimeApp(state: RuntimeState): Hono {
   const app = new Hono();
 
   app.use('*', async (c, next) => {
-    c.header('access-control-allow-origin', '*');
-    c.header('access-control-allow-methods', 'GET,POST,OPTIONS');
-    c.header('access-control-allow-headers', 'content-type');
-    c.header('access-control-max-age', '600');
+    const origin = c.req.header('origin');
+    if (origin) {
+      if (!ALLOWED_BROWSER_ORIGINS.has(origin)) {
+        if (c.req.method === 'OPTIONS') return c.body(null, 403);
+        return c.json({ ok: false, error: { code: 'CORS_ORIGIN_DENIED', message: `Origin is not allowed: ${origin}` } }, 403);
+      }
+      c.header('access-control-allow-origin', origin);
+      c.header('access-control-allow-methods', 'GET,POST,OPTIONS');
+      c.header('access-control-allow-headers', CORS_ALLOW_HEADERS);
+      c.header('access-control-max-age', '600');
+      c.header('vary', 'origin');
+    }
     if (c.req.method === 'OPTIONS') return c.body(null, 204);
     return next();
   });
@@ -36,22 +55,32 @@ export function createRuntimeApp(state: RuntimeState): Hono {
   app.use('*', bodyLimit({ maxSize: MAX_JSON_BODY_BYTES }));
 
   app.onError((error, c) => {
-    const status = error instanceof z.ZodError ? 400 : 500;
+    const status = errorStatus(error);
     return c.json({ ok: false, error: normalizeError(error) }, status);
   });
 
-  app.get('/health', (c) => c.json({
-    ok: true,
-    service: 'figma-react-restore',
-    version: SERVICE_VERSION,
-    pid: process.pid,
-    workspaceRoot: state.store.workspaceRoot,
-    artifactRoot: state.store.artifactRoot,
-    pluginConnected: state.listSessions().some((session) => session.connected),
-    activeJobs: state.activeJobCount(),
-  }));
+  app.get('/health', (c) => {
+    const base = {
+      ok: true,
+      service: 'figma-react-restore',
+      version: SERVICE_VERSION,
+    };
+    if (!c.req.header(ADMIN_TOKEN_HEADER)) return c.json(base);
+    requireAdmin(c, state);
+    return c.json({
+      ...base,
+      pid: process.pid,
+      workspaceRoot: state.store.workspaceRoot,
+      artifactRoot: state.store.artifactRoot,
+      pluginConnected: state.listSessions().some((session) => session.connected),
+      activeJobs: state.activeJobCount(),
+    });
+  });
 
-  app.get('/sessions', (c) => c.json({ ok: true, sessions: state.listSessions() }));
+  app.get('/sessions', (c) => {
+    requireAdmin(c, state);
+    return c.json({ ok: true, sessions: state.listSessions() });
+  });
 
   app.post('/sessions/register', async (c) => {
     const payload = sessionRegisterSchema.parse(await c.req.json());
@@ -76,37 +105,53 @@ export function createRuntimeApp(state: RuntimeState): Hono {
   });
 
   app.post('/jobs', async (c) => {
+    requireAdmin(c, state);
     const payload = jobCreateSchema.parse(await c.req.json());
     const job = state.createJob({
       capability: payload.capability,
       options: payload.options,
       ...(payload.sessionId ? { sessionId: payload.sessionId } : {}),
     });
-    return c.json({ ok: true, job });
+    return c.json({ ok: true, job: serializeJob(job) });
   });
 
   app.get('/jobs', (c) => {
     const sessionId = c.req.query('sessionId');
     const status = c.req.query('status');
-    let jobs = sessionId ? state.listJobsForSession(sessionId) : [...state.jobs.values()];
+    let includeSecret = false;
+    let jobs: RuntimeJob[];
+    if (hasAdmin(c, state)) {
+      jobs = sessionId ? state.listJobsForSession(sessionId) : [...state.jobs.values()];
+    } else {
+      if (!sessionId) {
+        throw new ServiceHttpError('ADMIN_AUTH_REQUIRED', 'Admin token is required for job queries without sessionId', 401);
+      }
+      includeSecret = true;
+      jobs = state
+        .listJobsForSession(sessionId)
+        .filter((job) => job.status === 'pending' || job.status === 'running');
+    }
     if (status) jobs = jobs.filter((job) => job.status === status);
-    return c.json({ ok: true, jobs });
+    return c.json({ ok: true, jobs: jobs.map((job) => serializeJob(job, { includeSecret })) });
   });
 
   app.get('/jobs/:jobId', (c) => {
+    requireAdmin(c, state);
     const job = state.getJob(c.req.param('jobId'));
-    return c.json({ ok: true, job });
+    return c.json({ ok: true, job: serializeJob(job) });
   });
 
   app.post('/jobs/:jobId/progress', async (c) => {
+    requireJobAccess(c, state, c.req.param('jobId'));
     const progress = jobProgressSchema.parse(await c.req.json());
     const job = state.addProgress(c.req.param('jobId'), progress);
-    return c.json({ ok: true, job });
+    return c.json({ ok: true, job: serializeJob(job) });
   });
 
   app.post('/jobs/:jobId/artifacts', async (c) => {
     const jobId = c.req.param('jobId');
-    const job = state.getJob(jobId);
+    const job = requireJobAccess(c, state, jobId);
+    state.assertActiveJob(jobId, 'add artifacts');
     if (!job.runId) throw new Error(`Job has no run: ${jobId}`);
     const payload = artifactUploadSchema.parse(await c.req.json());
     if (!payload.mediaType) {
@@ -135,13 +180,14 @@ export function createRuntimeApp(state: RuntimeState): Hono {
 
   app.post('/jobs/:jobId/result', async (c) => {
     const jobId = c.req.param('jobId');
-    const job = state.getJob(jobId);
+    const job = requireJobAccess(c, state, jobId);
+    state.assertActiveJob(jobId, 'finish');
     if (!job.runId) throw new Error(`Job has no run: ${jobId}`);
     const payload = jobResultSchema.parse(await c.req.json());
     if (!payload.ok) {
       state.store.updateRun(job.runId, { status: payload.error.recoverable ? 'blocked' : 'failed' });
       const failed = state.failJob(jobId, payload.error);
-      return c.json({ ok: true, job: failed, runId: job.runId });
+      return c.json({ ok: true, job: serializeJob(failed), runId: job.runId });
     }
     const extraction = attachArtifactPaths(payload.result, job.artifactRefs);
     const parsed = rawExtractionSchema.parse(extraction);
@@ -151,13 +197,14 @@ export function createRuntimeApp(state: RuntimeState): Hono {
     });
     state.store.updateRun(job.runId, { status: 'completed' });
     const completed = state.completeJob(jobId, { runId: job.runId, extraction: parsed });
-    return c.json({ ok: true, job: completed, runId: job.runId });
+    return c.json({ ok: true, job: serializeJob(completed), runId: job.runId });
   });
 
   app.post('/jobs/:jobId/cancel', (c) => {
+    requireAdmin(c, state);
     const job = state.cancelJob(c.req.param('jobId'));
     if (job.runId) state.store.updateRun(job.runId, { status: 'blocked' });
-    return c.json({ ok: true, job });
+    return c.json({ ok: true, job: serializeJob(job) });
   });
 
   return app;
@@ -209,9 +256,77 @@ function formatSse(event: string, data: unknown): string {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
+class ServiceHttpError extends Error {
+  readonly code: string;
+  readonly status: 401 | 403;
+
+  constructor(code: string, message: string, status: 401 | 403) {
+    super(message);
+    this.name = 'ServiceHttpError';
+    this.code = code;
+    this.status = status;
+  }
+}
+
+function requireAdmin(c: Context, state: RuntimeState): void {
+  const token = c.req.header(ADMIN_TOKEN_HEADER);
+  if (!token) throw new ServiceHttpError('ADMIN_AUTH_REQUIRED', 'Admin token is required', 401);
+  if (!constantTimeEqual(token, state.adminToken)) {
+    throw new ServiceHttpError('ADMIN_AUTH_INVALID', 'Admin token is invalid', 403);
+  }
+}
+
+function hasAdmin(c: Context, state: RuntimeState): boolean {
+  const token = c.req.header(ADMIN_TOKEN_HEADER);
+  if (!token) return false;
+  if (!constantTimeEqual(token, state.adminToken)) {
+    throw new ServiceHttpError('ADMIN_AUTH_INVALID', 'Admin token is invalid', 403);
+  }
+  return true;
+}
+
+function requireJobAccess(c: Context, state: RuntimeState, jobId: string): RuntimeJob {
+  const sessionId = c.req.header(PLUGIN_SESSION_HEADER);
+  const jobSecret = c.req.header(JOB_SECRET_HEADER);
+  if (!sessionId || !jobSecret) {
+    throw new ServiceHttpError('JOB_SECRET_REQUIRED', 'Plugin session id and job secret are required', 401);
+  }
+  const job = state.getJob(jobId);
+  if (job.sessionId !== sessionId || !constantTimeEqual(jobSecret, job.jobSecret)) {
+    throw new ServiceHttpError('JOB_SECRET_INVALID', 'Job owner or secret is invalid', 403);
+  }
+  return job;
+}
+
+function constantTimeEqual(actual: string, expected: string): boolean {
+  const actualBuffer = Buffer.from(actual);
+  const expectedBuffer = Buffer.from(expected);
+  if (actualBuffer.length !== expectedBuffer.length) return false;
+  return timingSafeEqual(actualBuffer, expectedBuffer);
+}
+
+function serializeJob(job: RuntimeJob, options: { includeSecret?: boolean } = {}): Omit<RuntimeJob, 'jobSecret'> | RuntimeJob {
+  if (options.includeSecret) return job;
+  const { jobSecret: _jobSecret, ...safeJob } = job;
+  return safeJob;
+}
+
+function errorStatus(error: unknown): 400 | 401 | 403 | 404 | 409 | 500 {
+  if (error instanceof z.ZodError) return 400;
+  if (error instanceof ServiceHttpError) return error.status;
+  if (error instanceof RuntimeStateError) {
+    if (error.status === 404) return 404;
+    if (error.status === 409) return 409;
+  }
+  return 500;
+}
+
 function normalizeError(error: unknown): { code: string; message: string; details?: unknown } {
   if (error instanceof z.ZodError) {
     return { code: 'VALIDATION_ERROR', message: 'Invalid request payload', details: error.issues };
+  }
+  if (error instanceof ServiceHttpError || error instanceof RuntimeStateError) {
+    return { code: error.code, message: error.message };
   }
   if (error instanceof Error) return { code: 'INTERNAL_ERROR', message: error.message };
   return { code: 'INTERNAL_ERROR', message: String(error) };

@@ -34,7 +34,7 @@ The runtime service is only needed for Figma Desktop plugin connection and extra
    figma-react-restore extract --selection --manage-service
    ```
 
-   The plugin connects automatically to `http://localhost:49327`; no token, Register button, or Event button is required. If the plugin was opened before the managed service exists, it may briefly show a connection failure; leave it open or reopen it so it can reconnect.
+   The plugin connects automatically to `http://127.0.0.1:49327`; no token, Register button, or Event button is required. If the plugin was opened before the managed service exists, it may briefly show a connection failure; leave it open or reopen it so it can reconnect.
 
 4. If you already have the plugin open and connected, the same extraction command will use that session.
 5. Ensure the runtime service is stopped after extraction completes. `--manage-service` stops services it started; otherwise run:

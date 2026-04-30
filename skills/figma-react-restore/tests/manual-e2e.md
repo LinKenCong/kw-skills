@@ -4,7 +4,7 @@ Use after automated tests pass.
 
 1. Run `npm install && npm run build` inside `skills/figma-react-restore`.
 2. Start a target React route, for example `tests/fixtures/react-vite` with `npm install && npm run dev`.
-3. In Figma Desktop, import `plugin/manifest.json`, select one frame, then open the development plugin. It should auto-connect to `http://localhost:49327` after extraction starts, without token entry or Register/Event clicks.
+3. In Figma Desktop, import `plugin/manifest.json`, select one frame, then open the development plugin. It should auto-connect to `http://127.0.0.1:49327` after extraction starts, without token entry or Register/Event clicks.
    - This uses a development plugin and must not require Dev Mode, REST API access, Marketplace publishing, or plugin payments. Starter plan files should work; Organization or Enterprise files may still have seat/admin restrictions.
 4. Run `extract --selection --manage-service`, confirm the command stops its managed service after extraction, then run `build-ir --run <runId> --route <route>` and `restore --project <project> --route <route> --run <runId>`.
 5. If a manual service was used instead, run `service stop --project <react-project>` before build/restore and keep `.figma-react-restore/runs/<runId>/` intact.

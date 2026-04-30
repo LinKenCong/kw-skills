@@ -19,7 +19,7 @@
   <div class="status">Keep this plugin window open. It registers automatically and listens for extraction jobs.</div>
   <pre id="log"></pre>
 <script>
-const SERVICE_URL = 'http://localhost:49327';
+const SERVICE_URL = 'http://127.0.0.1:49327';
 const HEARTBEAT_MS = 5000;
 const POLL_MS = 1000;
 
@@ -50,6 +50,7 @@ const state = {
   connecting: false,
   registered: false,
   handledJobs: {},
+  jobSecrets: {},
 };
 storageSet('frr.sessionId', state.pluginSessionId);
 
@@ -73,12 +74,12 @@ window.onmessage = async function (event) {
     return;
   }
   if (message.type === 'progress') {
-    await postJson(`/jobs/${message.jobId}/progress`, message.progress).catch(showError);
+    await postJobJson(message.jobId, `/jobs/${message.jobId}/progress`, message.progress).catch(showError);
     log(`Progress ${message.jobId}: ${message.progress.stage}`);
     return;
   }
   if (message.type === 'extract-error') {
-    await postJson(`/jobs/${message.jobId}/result`, { ok: false, error: message.error }).catch(showError);
+    await postJobJson(message.jobId, `/jobs/${message.jobId}/result`, { ok: false, error: message.error }).catch(showError);
     log(`Extraction failed: ${message.error.message}`);
     return;
   }
@@ -220,6 +221,7 @@ async function pollJobs() {
 
 function handleJob(job, source) {
   if (!job || state.handledJobs[job.jobId]) return;
+  if (job.jobSecret) state.jobSecrets[job.jobId] = job.jobSecret;
   state.handledJobs[job.jobId] = true;
   log(`Job ${source}: ${job.jobId} ${job.capability}`);
   if (job.capability === 'extract.selection') {
@@ -230,7 +232,7 @@ function handleJob(job, source) {
 async function finishExtraction(message) {
   for (const artifact of message.artifacts) {
     const dataBase64 = bytesToBase64(artifact.bytes);
-    await postJson(`/jobs/${message.jobId}/artifacts`, {
+    await postJobJson(message.jobId, `/jobs/${message.jobId}/artifacts`, {
       artifactId: artifact.artifactId,
       kind: artifact.kind,
       fileName: artifact.fileName,
@@ -240,14 +242,14 @@ async function finishExtraction(message) {
     });
     log(`Uploaded artifact ${artifact.artifactId}`);
   }
-  await postJson(`/jobs/${message.jobId}/result`, { ok: true, result: message.extraction });
+  await postJobJson(message.jobId, `/jobs/${message.jobId}/result`, { ok: true, result: message.extraction });
   log(`Extraction completed for job ${message.jobId}`);
 }
 
 async function failExtraction(jobId, error) {
   if (!jobId) return;
   const message = error && error.message ? error.message : String(error);
-  await postJson(`/jobs/${jobId}/result`, {
+  await postJobJson(jobId, `/jobs/${jobId}/result`, {
     ok: false,
     error: {
       code: 'ARTIFACT_UPLOAD_FAILED',
@@ -263,6 +265,23 @@ async function postJson(endpoint, body) {
   const response = await fetch(`${SERVICE_URL}${endpoint}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await response.json();
+  if (!response.ok || data.ok === false) throw new Error(data.error ? data.error.message : `HTTP ${response.status}`);
+  return data;
+}
+
+async function postJobJson(jobId, endpoint, body) {
+  const jobSecret = state.jobSecrets[jobId];
+  if (!jobSecret) throw new Error(`Missing job secret for ${jobId}`);
+  const response = await fetch(`${SERVICE_URL}${endpoint}`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-frr-plugin-session-id': state.pluginSessionId,
+      'x-frr-job-secret': jobSecret,
+    },
     body: JSON.stringify(body),
   });
   const data = await response.json();

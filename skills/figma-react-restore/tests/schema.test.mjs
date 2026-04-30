@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { minimalDesignIrSchema, repairPlanSchema, verifyReportSchema } from '../dist/schema.js';
+import { minimalDesignIrSchema, repairPlanSchema, serviceLockSchema, verifyReportSchema } from '../dist/schema.js';
 
 test('schemas accept minimal valid V1 payloads', () => {
   const ir = minimalDesignIrSchema.parse({
@@ -41,6 +41,19 @@ test('schemas accept minimal valid V1 payloads', () => {
     nextActions: [],
   });
   assert.equal(plan.status, 'passed');
+
+  const lock = serviceLockSchema.parse({
+    service: 'figma-react-restore',
+    version: '0.1.0',
+    pid: process.pid,
+    port: 49327,
+    url: 'http://127.0.0.1:49327',
+    adminToken: 'test_admin_token_123456789012345678901234',
+    startedAt: new Date().toISOString(),
+    workspaceRoot: '/tmp/project',
+    artifactRoot: '/tmp/project/.figma-react-restore',
+  });
+  assert.equal(lock.url, 'http://127.0.0.1:49327');
 });
 
 test('schema rejects invalid evidence level', () => {

@@ -506,6 +506,7 @@ export const serviceLockSchema = z.object({
   pid: z.number().int().positive(),
   port: z.number().int().positive(),
   url: z.string(),
+  adminToken: z.string().min(32),
   startedAt: z.string(),
   workspaceRoot: z.string(),
   artifactRoot: z.string(),

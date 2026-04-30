@@ -326,7 +326,7 @@ async function waitForRuntimeService(projectRoot: string, child: ChildProcess, t
     if (child.exitCode !== null) throw new Error(`Managed runtime service exited before becoming healthy with code ${child.exitCode}`);
     await delay(100);
   }
-  throw new Error(`Timed out waiting for managed runtime service at http://localhost:${DEFAULT_PORT}`);
+  throw new Error(`Timed out waiting for managed runtime service at http://127.0.0.1:${DEFAULT_PORT}`);
 }
 
 async function waitForPluginSession(lock: ServiceLock, options: { sessionId?: string; timeoutMs: number }): Promise<void> {
@@ -347,9 +347,12 @@ async function waitForPluginSession(lock: ServiceLock, options: { sessionId?: st
 }
 
 async function serviceFetch(lock: ServiceLock, endpoint: string, options: { method?: string; body?: unknown } = {}): Promise<unknown> {
+  const headers: Record<string, string> = { 'x-frr-admin-token': lock.adminToken };
+  if (options.body) headers['content-type'] = 'application/json';
   const init: RequestInit = {
     method: options.method || 'GET',
-    ...(options.body ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify(options.body) } : {}),
+    headers,
+    ...(options.body ? { body: JSON.stringify(options.body) } : {}),
   };
   const response = await fetch(`${lock.url}${endpoint}`, init);
   const data = await response.json() as unknown;

@@ -35,7 +35,9 @@ const DEFAULT_FETCH_TIMEOUT_MS = 1500;
 const DEFAULT_STOP_TIMEOUT_MS = 5000;
 
 export async function readServiceHealth(lock: ServiceLock, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS): Promise<ServiceHealth> {
-  const response = await fetchWithTimeout(`${lock.url}/health`, timeoutMs);
+  const response = await fetchWithTimeout(`${lock.url}/health`, timeoutMs, {
+    headers: { 'x-frr-admin-token': lock.adminToken },
+  });
   const data = await response.json() as ServiceHealth;
   if (!response.ok) throw new Error(`Runtime service returned HTTP ${response.status}`);
   return data;
@@ -43,6 +45,7 @@ export async function readServiceHealth(lock: ServiceLock, timeoutMs = DEFAULT_F
 
 export function validateServiceHealth(lock: ServiceLock, health: ServiceHealth): string | null {
   if (health.service !== 'figma-react-restore') return `Unexpected service: ${String(health.service || 'unknown')}`;
+  if (!health.pid) return 'Health response is missing pid; admin token may be invalid';
   if (health.pid !== lock.pid) return `Health pid ${String(health.pid)} does not match lock pid ${lock.pid}`;
   if (!health.workspaceRoot) return 'Health response is missing workspaceRoot';
   if (path.resolve(health.workspaceRoot) !== path.resolve(lock.workspaceRoot)) {
@@ -146,11 +149,11 @@ export async function stopRuntimeService(options: StopServiceOptions = {}): Prom
   return { ...base, ok: true, status: 'stopped', message: 'Runtime service stopped', activeJobs };
 }
 
-async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
+async function fetchWithTimeout(url: string, timeoutMs: number, init: RequestInit = {}): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, { signal: controller.signal });
+    return await fetch(url, { ...init, signal: controller.signal });
   } finally {
     clearTimeout(timer);
   }

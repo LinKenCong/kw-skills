@@ -18,6 +18,7 @@ function makeLock(projectRoot, patch = {}) {
     pid: 2147483647,
     port: 9,
     url: 'http://127.0.0.1:9',
+    adminToken: 'test_admin_token_123456789012345678901234',
     startedAt: new Date().toISOString(),
     workspaceRoot: projectRoot,
     artifactRoot: path.join(projectRoot, '.figma-react-restore'),

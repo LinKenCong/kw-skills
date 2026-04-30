@@ -1,6 +1,7 @@
 import { createId, nowIso } from '../ids.js';
 import type { ArtifactRef, ErrorPayload, JobProgress, SessionRegister } from '../schema.js';
 import { ArtifactStore } from '../artifact/store.js';
+import { createRuntimeSecret } from './lockfile.js';
 
 export type RuntimeSession = SessionRegister & {
   connected: boolean;
@@ -12,6 +13,7 @@ export type RuntimeJobStatus = 'pending' | 'running' | 'completed' | 'failed' | 
 
 export type RuntimeJob = {
   jobId: string;
+  jobSecret: string;
   capability: string;
   sessionId: string;
   status: RuntimeJobStatus;
@@ -36,15 +38,30 @@ export type EventSubscriber = {
 };
 
 const SESSION_TTL_MS = 15_000;
+const TERMINAL_JOB_STATUSES = new Set<RuntimeJobStatus>(['completed', 'failed', 'canceled']);
+
+export class RuntimeStateError extends Error {
+  readonly code: string;
+  readonly status: number;
+
+  constructor(code: string, message: string, status: number) {
+    super(message);
+    this.name = 'RuntimeStateError';
+    this.code = code;
+    this.status = status;
+  }
+}
 
 export class RuntimeState {
   readonly store: ArtifactStore;
+  readonly adminToken: string;
   readonly sessions = new Map<string, RuntimeSession>();
   readonly jobs = new Map<string, RuntimeJob>();
   readonly subscribers = new Map<string, Set<EventSubscriber>>();
 
-  constructor(options: { store: ArtifactStore }) {
+  constructor(options: { store: ArtifactStore; adminToken: string }) {
     this.store = options.store;
+    this.adminToken = options.adminToken;
   }
 
   registerSession(payload: SessionRegister): RuntimeSession {
@@ -69,14 +86,18 @@ export class RuntimeState {
     this.pruneStaleSessions();
     if (sessionId) {
       const session = this.sessions.get(sessionId);
-      if (!session || !session.connected) throw new Error(`Plugin session not connected: ${sessionId}`);
+      if (!session || !session.connected) {
+        throw new RuntimeStateError('SESSION_NOT_CONNECTED', `Plugin session not connected: ${sessionId}`, 409);
+      }
       return session;
     }
     const connected = this.listSessions().filter((session) => session.connected);
-    if (connected.length === 0) throw new Error('No Figma plugin session connected');
-    if (connected.length > 1) throw new Error('Multiple plugin sessions connected; pass --session <id>');
+    if (connected.length === 0) throw new RuntimeStateError('NO_PLUGIN_SESSION', 'No Figma plugin session connected', 409);
+    if (connected.length > 1) {
+      throw new RuntimeStateError('MULTIPLE_PLUGIN_SESSIONS', 'Multiple plugin sessions connected; pass --session <id>', 409);
+    }
     const session = connected[0];
-    if (!session) throw new Error('No Figma plugin session connected');
+    if (!session) throw new RuntimeStateError('NO_PLUGIN_SESSION', 'No Figma plugin session connected', 409);
     return session;
   }
 
@@ -89,6 +110,7 @@ export class RuntimeState {
     });
     const job: RuntimeJob = {
       jobId: createId('job'),
+      jobSecret: createRuntimeSecret(),
       capability: input.capability,
       sessionId: session.pluginSessionId,
       status: 'pending',
@@ -106,7 +128,7 @@ export class RuntimeState {
 
   getJob(jobId: string): RuntimeJob {
     const job = this.jobs.get(jobId);
-    if (!job) throw new Error(`Unknown job: ${jobId}`);
+    if (!job) throw new RuntimeStateError('JOB_NOT_FOUND', `Unknown job: ${jobId}`, 404);
     return job;
   }
 
@@ -123,26 +145,35 @@ export class RuntimeState {
     return next;
   }
 
-  addProgress(jobId: string, progress: JobProgress): RuntimeJob {
+  assertActiveJob(jobId: string, action: string): RuntimeJob {
     const job = this.getJob(jobId);
+    assertJobActive(job, action);
+    return job;
+  }
+
+  addProgress(jobId: string, progress: JobProgress): RuntimeJob {
+    const job = this.assertActiveJob(jobId, 'record progress');
     const status: RuntimeJobStatus = job.status === 'pending' ? 'running' : job.status;
     return this.updateJob(jobId, { status, progress: [...job.progress, progress] });
   }
 
   addArtifact(jobId: string, ref: ArtifactRef): RuntimeJob {
-    const job = this.getJob(jobId);
+    const job = this.assertActiveJob(jobId, 'add artifacts');
     return this.updateJob(jobId, { artifactRefs: [...job.artifactRefs, ref] });
   }
 
   completeJob(jobId: string, result: unknown): RuntimeJob {
+    this.assertActiveJob(jobId, 'complete');
     return this.updateJob(jobId, { status: 'completed', result });
   }
 
   failJob(jobId: string, error: ErrorPayload): RuntimeJob {
+    this.assertActiveJob(jobId, 'fail');
     return this.updateJob(jobId, { status: 'failed', error });
   }
 
   cancelJob(jobId: string): RuntimeJob {
+    this.assertActiveJob(jobId, 'cancel');
     const job = this.updateJob(jobId, { status: 'canceled' });
     this.emit(job.sessionId, { type: 'job.canceled', job });
     return job;
@@ -177,4 +208,17 @@ export class RuntimeState {
       this.sessions.set(sessionId, { ...session, connected: false });
     }
   }
+}
+
+export function isTerminalJobStatus(status: RuntimeJobStatus): boolean {
+  return TERMINAL_JOB_STATUSES.has(status);
+}
+
+function assertJobActive(job: RuntimeJob, action: string): void {
+  if (!isTerminalJobStatus(job.status)) return;
+  throw new RuntimeStateError(
+    'JOB_TERMINAL',
+    `Cannot ${action} terminal job ${job.jobId} with status ${job.status}`,
+    409
+  );
 }

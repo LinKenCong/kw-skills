@@ -1,11 +1,16 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { serviceLockSchema, type ServiceLock } from '../schema.js';
 import { nowIso } from '../ids.js';
 import { readJsonIfExists, writeJsonFile } from '../json.js';
 import { DEFAULT_PORT, resolveArtifactRoot, resolveWorkspaceRoot, serviceLockPath } from '../paths.js';
 
 export const SERVICE_VERSION = '0.1.0';
+
+export function createRuntimeSecret(bytes = 32): string {
+  return randomBytes(bytes).toString('base64url');
+}
 
 export function createServiceLock(options: { workspaceRoot?: string; artifactRoot?: string; port?: number } = {}): ServiceLock {
   const workspaceRoot = resolveWorkspaceRoot(options.workspaceRoot || process.cwd());
@@ -16,7 +21,8 @@ export function createServiceLock(options: { workspaceRoot?: string; artifactRoo
     version: SERVICE_VERSION,
     pid: process.pid,
     port,
-    url: `http://localhost:${port}`,
+    url: `http://127.0.0.1:${port}`,
+    adminToken: createRuntimeSecret(),
     startedAt: nowIso(),
     workspaceRoot,
     artifactRoot,
@@ -24,7 +30,9 @@ export function createServiceLock(options: { workspaceRoot?: string; artifactRoo
 }
 
 export function writeServiceLock(lock: ServiceLock): void {
-  writeJsonFile(serviceLockPath(lock.workspaceRoot), serviceLockSchema.parse(lock));
+  const filePath = serviceLockPath(lock.workspaceRoot);
+  writeJsonFile(filePath, serviceLockSchema.parse(lock));
+  fs.chmodSync(filePath, 0o600);
 }
 
 export function readServiceLock(workspaceRoot = process.cwd()): ServiceLock | null {

@@ -95,7 +95,7 @@ export function startDevRuntimeService(options: StartDevServiceOptions): void {
     process.exit(0);
   });
 
-  process.stdout.write(`[service dev] watching ${paths.distRoot}; url=http://localhost:${port}\n`);
+  process.stdout.write(`[service dev] watching ${paths.distRoot}; url=http://127.0.0.1:${port}\n`);
   startCompiler();
   startWatcher();
   startService();

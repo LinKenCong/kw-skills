@@ -59,7 +59,7 @@ npm run dev:service -- --project <react-project>
 
 `service dev` runs `tsc --watch`, watches `dist/**/*.js`, and restarts only the runtime service process after rebuilds. The Figma plugin reconnects automatically after service restarts.
 
-`service start` binds to the fixed local endpoint `http://localhost:49327`. The development plugin manifest and UI are intentionally pinned to this endpoint, so V1 does not expose a custom port in the CLI. It does not hot-reload the Figma plugin UI/main script; relaunch or re-import the development plugin after changing files under `plugin/`.
+`service start` binds to the fixed local endpoint `http://127.0.0.1:49327`. The development plugin manifest and UI are intentionally pinned to this endpoint, so V1 does not expose a custom port in the CLI. It does not hot-reload the Figma plugin UI/main script; relaunch or re-import the development plugin after changing files under `plugin/`.
 
 The runtime service is needed only for Figma plugin registration and extraction. Prefer `extract --selection --manage-service` for normal use: it starts the service when needed, waits for a plugin session by default, and stops the service after extraction if it started it. If you started the service manually, run `figma-react-restore service stop --project <react-project>` after extraction completes; the run artifacts remain in `.figma-react-restore/runs/<runId>/` for build and verification.
 
