@@ -75,6 +75,32 @@ test('DOM mapping tiers only fail required missing mappings', () => {
   assert.equal(warnings[0].code, 'DOM_MAPPING_OPTIONAL_SKIPPED');
 });
 
+test('DOM mapping uses union box for one Figma node split across inline DOM nodes', () => {
+  const spec = {
+    schemaVersion: 1,
+    runId: 'run_1',
+    route: 'http://localhost:3000',
+    viewport: { width: 100, height: 80, dpr: 1 },
+    baselineScreenshot: 'expected.png',
+    regions: [
+      { regionId: 'hero-title', nodeId: 'hero-title', kind: 'text', box: { x: 10, y: 20, w: 100, h: 20 }, strictness: 'strict', mapping: 'required' },
+    ],
+    texts: [],
+    assets: [],
+    colors: [],
+    typography: [],
+    thresholds: { fullPageMaxDiffRatio: 0.03, regionMaxDiffRatio: 0.01, boxTolerancePx: 2 },
+  };
+
+  const results = buildDomResults(spec, [
+    { nodeId: 'hero-title', selector: '[data-figma-node="hero-title"] span:first-child', box: { x: 10, y: 20, w: 45, h: 20 }, computed: {} },
+    { nodeId: 'hero-title', selector: '[data-figma-node="hero-title"] span:last-child', box: { x: 55, y: 20, w: 55, h: 20 }, computed: {} },
+  ], 2);
+
+  assert.equal(results[0].status, 'passed');
+  assert.deepEqual(results[0].box, { x: 10, y: 20, w: 100, h: 20 });
+});
+
 test('route state assertion failures become wrong-state failures', () => {
   const failures = buildStateFailures([
     {

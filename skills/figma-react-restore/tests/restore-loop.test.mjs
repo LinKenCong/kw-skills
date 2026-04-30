@@ -49,6 +49,9 @@ test('restore writes blocked final artifacts when verification environment is bl
   assert.ok(result.reportPath);
   assert.ok(result.repairPlanPath);
   assert.ok(result.agentBriefPath);
+  assert.ok(result.implementationBriefPath);
   assert.ok(fs.existsSync(path.join(store.getRunDir(run.runId), 'final-report.json')));
+  const attempt = JSON.parse(fs.readFileSync(path.join(store.getRunDir(run.runId), 'restore', 'attempts', '001', 'attempt.json'), 'utf8'));
+  assert.equal(attempt.implementationBriefPath, result.implementationBriefPath);
   assert.ok(fs.existsSync(path.join(store.getRunDir(run.runId), 'restore', 'archive', 'latest.manifest.json')));
 });

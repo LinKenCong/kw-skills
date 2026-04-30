@@ -69,3 +69,12 @@ test('plugin UI inlines protocol helpers for Figma __html__ runtime', () => {
   assert.equal(html.includes(protocolSource), true);
   assert.equal(html.includes(sharedSource), true);
 });
+
+test('plugin UI waits for service ACK before terminal failure state', () => {
+  const html = fs.readFileSync(path.resolve('plugin/ui.html'), 'utf8');
+  assert.match(html, /await reportExtractionFailure\(message\.jobId, message\.error\)/);
+  assert.match(html, /state\.jobTracker\.mark\(jobId, protocol\.JOB_STATUS\.reporting/);
+  assert.match(html, /await postJobJson\(jobId, `\/jobs\/\$\{jobId\}\/result`/);
+  assert.match(html, /state\.jobTracker\.mark\(jobId, protocol\.JOB_STATUS\.failed/);
+  assert.match(html, /state\.jobTracker\.mark\(jobId, protocol\.JOB_STATUS\.orphaned/);
+});

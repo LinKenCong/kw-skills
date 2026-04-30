@@ -500,6 +500,7 @@ export const restoreAttemptSchema = z.object({
   reportPath: z.string().optional(),
   repairPlanPath: z.string().optional(),
   agentBriefPath: z.string().optional(),
+  implementationBriefPath: z.string().optional(),
   patchSummaryPath: z.string().optional(),
   error: errorPayloadSchema.optional(),
 });

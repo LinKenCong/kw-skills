@@ -612,8 +612,10 @@ function isToleratedFontRenderingDiff(
   return text?.status === 'passed' && dom?.status === 'passed' && !styleFailureNodes.has(region.nodeId);
 }
 
-export function buildDomResults(spec: FidelitySpec, nodes: { nodeId: string; selector: string; box: Box; computed: Record<string, string> }[], tolerance: number): DomResult[] {
-  const byNode = new Map(nodes.map((node) => [node.nodeId, node]));
+type DomComparableNode = { nodeId: string; selector: string; box: Box; computed: Record<string, string> };
+
+export function buildDomResults(spec: FidelitySpec, nodes: DomComparableNode[], tolerance: number): DomResult[] {
+  const byNode = groupNodesById(nodes);
   const results: DomResult[] = [];
   for (const region of spec.regions) {
     const mapping = mappingForRegion(region);
@@ -639,8 +641,8 @@ export function buildDomResults(spec: FidelitySpec, nodes: { nodeId: string; sel
       });
       continue;
     }
-    const node = byNode.get(region.nodeId);
-    if (!node) {
+    const grouped = byNode.get(region.nodeId);
+    if (!grouped || grouped.length === 0) {
       results.push({
         nodeId: region.nodeId,
         selector,
@@ -652,6 +654,7 @@ export function buildDomResults(spec: FidelitySpec, nodes: { nodeId: string; sel
       });
       continue;
     }
+    const node = mergedDomNode(grouped);
     const mismatch = boxMismatch(region.box, node.box, tolerance);
     results.push({
       nodeId: region.nodeId,
@@ -1005,8 +1008,8 @@ function bestNodeText(node: CapturedDomNode): string {
   return node.innerText || node.textContent || node.ariaLabel || node.alt || node.value || '';
 }
 
-function groupNodesById(nodes: CapturedDomNode[]): Map<string, CapturedDomNode[]> {
-  const byNode = new Map<string, CapturedDomNode[]>();
+function groupNodesById<T extends { nodeId: string }>(nodes: T[]): Map<string, T[]> {
+  const byNode = new Map<string, T[]>();
   for (const node of nodes) {
     if (!node.nodeId) continue;
     const list = byNode.get(node.nodeId) || [];
@@ -1014,6 +1017,24 @@ function groupNodesById(nodes: CapturedDomNode[]): Map<string, CapturedDomNode[]
     byNode.set(node.nodeId, list);
   }
   return byNode;
+}
+
+function mergedDomNode<T extends DomComparableNode>(nodes: T[]): T {
+  if (nodes.length === 1) return nodes[0]!;
+  const first = nodes[0]!;
+  return {
+    ...first,
+    selector: nodes.map((node) => node.selector).join(', '),
+    box: unionBoxes(nodes.map((node) => node.box)),
+  };
+}
+
+function unionBoxes(boxes: Box[]): Box {
+  const left = Math.min(...boxes.map((box) => box.x));
+  const top = Math.min(...boxes.map((box) => box.y));
+  const right = Math.max(...boxes.map((box) => box.x + box.w));
+  const bottom = Math.max(...boxes.map((box) => box.y + box.h));
+  return { x: left, y: top, w: right - left, h: bottom - top };
 }
 
 function bestTextForNodes(nodes: CapturedDomNode[]): string {

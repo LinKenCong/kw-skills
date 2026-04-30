@@ -228,8 +228,7 @@ window.onmessage = async function (event) {
     return;
   }
   if (message.type === 'extract-error') {
-    state.jobTracker.mark(message.jobId, protocol.JOB_STATUS.failed, { error: message.error });
-    await postJobJson(message.jobId, `/jobs/${message.jobId}/result`, { ok: false, error: message.error }).catch(showError);
+    await reportExtractionFailure(message.jobId, message.error).catch(showError);
     log(`Extraction failed: ${message.error.message}`);
     return;
   }
@@ -239,8 +238,7 @@ window.onmessage = async function (event) {
       await finishExtraction(message);
       state.jobTracker.mark(message.jobId, protocol.JOB_STATUS.completed);
     } catch (error) {
-      state.jobTracker.mark(message.jobId, protocol.JOB_STATUS.failed, { error: normalizeErrorPayload(error) });
-      await failExtraction(message.jobId, error).catch(showError);
+      await reportExtractionFailure(message.jobId, error).catch(showError);
       showError(error);
     }
   }
@@ -425,20 +423,46 @@ async function uploadArtifactWithRetry(jobId, payload, index, total) {
   throw lastError;
 }
 
-async function failExtraction(jobId, error) {
-  if (!jobId) return;
+async function reportExtractionFailure(jobId, error) {
+  if (!jobId) return false;
   const normalized = normalizeErrorPayload(error);
-  await postJobJson(jobId, `/jobs/${jobId}/result`, {
-    ok: false,
-    error: {
-      code: normalized.code,
-      message: normalized.message,
-      recoverable: normalized.recoverable,
-      hint: normalized.hint,
-      httpStatus: normalized.httpStatus,
-    },
-  });
-  log(`Extraction marked failed for job ${jobId}: ${normalized.code}`);
+  state.jobTracker.mark(jobId, protocol.JOB_STATUS.reporting, { error: normalized });
+  try {
+    await postJobJson(jobId, `/jobs/${jobId}/result`, {
+      ok: false,
+      error: {
+        code: normalized.code,
+        message: normalized.message,
+        recoverable: normalized.recoverable,
+        hint: normalized.hint,
+        httpStatus: normalized.httpStatus,
+      },
+    });
+    state.jobTracker.mark(jobId, protocol.JOB_STATUS.failed, { error: normalized });
+    log(`Extraction marked failed for job ${jobId}: ${normalized.code}`);
+    return true;
+  } catch (reportError) {
+    const reportFailure = normalizeErrorPayload(reportError);
+    if (isRetryableReportFailure(reportError)) {
+      state.jobTracker.mark(jobId, protocol.JOB_STATUS.orphaned, {
+        error: {
+          code: 'PLUGIN_FAILURE_REPORT_UNSENT',
+          message: `Plugin could not report extraction failure: ${reportFailure.message}`,
+          recoverable: true,
+          originalErrorCode: normalized.code,
+        },
+      });
+      log(`Failure report for job ${jobId} was not acknowledged: ${reportFailure.code}; will reconcile after reconnect`);
+      handleConnectionError(reportError);
+      return false;
+    }
+    state.jobTracker.mark(jobId, protocol.JOB_STATUS.failed, { error: reportFailure });
+    throw reportError;
+  }
+}
+
+function isRetryableReportFailure(error) {
+  return error instanceof shared.ServiceRequestError && shared.shouldRetryServiceError(error);
 }
 
 function normalizeErrorPayload(error) {
