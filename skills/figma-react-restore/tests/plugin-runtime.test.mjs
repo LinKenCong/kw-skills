@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 
@@ -56,4 +57,15 @@ test('plugin shared normalizeServiceError preserves code and retryability hints'
   assert.equal(error.recoverable, false);
   assert.equal(error.retryable, false);
   assert.equal(error.hint, 'reduce size');
+});
+
+test('plugin UI inlines protocol helpers for Figma __html__ runtime', () => {
+  const html = fs.readFileSync(path.resolve('plugin/ui.html'), 'utf8');
+  const protocolSource = fs.readFileSync(path.resolve('plugin/protocol.js'), 'utf8').trim();
+  const sharedSource = fs.readFileSync(path.resolve('plugin/shared.js'), 'utf8').trim();
+  assert.equal(/<script\s+src=/.test(html), false);
+  assert.match(html, /globalScope\.FrrProtocol = protocol/);
+  assert.match(html, /globalScope\.FrrPluginShared = /);
+  assert.equal(html.includes(protocolSource), true);
+  assert.equal(html.includes(sharedSource), true);
 });
