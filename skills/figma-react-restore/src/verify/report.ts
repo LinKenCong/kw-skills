@@ -7,14 +7,18 @@ import { readJsonFile, writeJsonFile } from '../json.js';
 import { inferArtifactRootFromPath, relativeArtifactPath, resolveReferencePath } from '../paths.js';
 import {
   fidelitySpecSchema,
+  routeStateContractSchema,
   verifyReportSchema,
   type Box,
+  type DomMapping,
   type DomResult,
   type Failure,
   type FidelitySpec,
   type Region,
   type RegionResult,
+  type RouteStateContract,
   type AssetEvidence,
+  type StateResult,
   type TextEvidence,
   type TextResult,
   type TypographyEvidence,
@@ -31,10 +35,12 @@ export type VerifyOptions = {
   outputDir?: string;
   attemptId?: string;
   waitMs?: number;
+  routeState?: RouteStateContract;
 };
 
 export async function runVerification(options: VerifyOptions): Promise<{ report: VerifyReport; reportPath: string }> {
   const spec = fidelitySpecSchema.parse(readJsonFile(options.specPath));
+  const routeState = mergeRouteState(spec.routeState, options.routeState);
   const attemptId = options.attemptId || createId('attempt');
   const artifactRoot = inferArtifactRootFromPath(options.specPath) || path.join(options.projectRoot, '.figma-react-restore');
   const specDir = path.dirname(path.resolve(options.specPath));
@@ -57,6 +63,7 @@ export async function runVerification(options: VerifyOptions): Promise<{ report:
       outputPath: actualPath,
       tracePath,
       ...(options.waitMs !== undefined ? { waitMs: options.waitMs } : {}),
+      ...(routeState ? { routeState } : {}),
     });
     fullPageCompare = await compareImages(expectedPath, capture.screenshotPath, diffPath);
   } catch (error) {
@@ -82,9 +89,12 @@ export async function runVerification(options: VerifyOptions): Promise<{ report:
   }
 
   const domResults = buildDomResults(spec, capture.domNodes, spec.thresholds.boxTolerancePx);
+  warnings.push(...buildDomMappingWarnings(domResults));
   const textResults = buildTextResults(spec, capture.domNodes, capture.visibleText);
+  const stateFailures = buildStateFailures(capture.stateResults);
   const textFailures = buildTextFailures(textResults);
   const styleFailures = buildStyleFailures(spec, domResults);
+  failures.push(...stateFailures);
   failures.push(...textFailures);
   failures.push(...styleFailures);
   failures.push(...buildRegionFailures({
@@ -97,10 +107,12 @@ export async function runVerification(options: VerifyOptions): Promise<{ report:
   }));
   for (const result of domResults) {
     if (result.status === 'failed' || result.status === 'missing') {
+      const mapping = result.mapping || 'required';
+      if (result.status === 'missing' && mapping !== 'required') continue;
       failures.push({
         failureId: createId('failure'),
         category: 'layout-spacing',
-        severity: result.status === 'missing' ? 'high' : 'medium',
+        severity: result.status === 'missing' ? 'high' : mapping === 'optional' ? 'low' : 'medium',
         message: result.message || 'DOM node does not match Figma region',
         ...(result.nodeId ? { nodeId: result.nodeId } : {}),
         selector: result.selector,
@@ -200,6 +212,7 @@ export async function runVerification(options: VerifyOptions): Promise<{ report:
     regionResults,
     domResults,
     textResults,
+    stateResults: capture.stateResults,
     failures,
     warnings,
   });
@@ -214,6 +227,25 @@ function resolveVerifyOutputDir(artifactRoot: string, outputDir: string | undefi
     throw new Error(`Verify output directory must stay inside artifact root: ${artifactRoot}`);
   }
   return resolved;
+}
+
+function mergeRouteState(base?: RouteStateContract, override?: RouteStateContract): RouteStateContract | undefined {
+  if (!base && !override) return undefined;
+  const expectedVisibleText = [...(base?.expectedVisibleText || []), ...(override?.expectedVisibleText || [])];
+  const assertions = [...(base?.assertions || []), ...(override?.assertions || [])];
+  const cookies = [...(base?.cookies || []), ...(override?.cookies || [])];
+  const localStorage = { ...(base?.localStorage || {}), ...(override?.localStorage || {}) };
+  const setupScript = [base?.setupScript, override?.setupScript].filter((item): item is string => Boolean(item)).join('\n');
+  const merged = {
+    ...(base || {}),
+    ...(override || {}),
+    expectedVisibleText,
+    assertions,
+    cookies,
+    ...(Object.keys(localStorage).length > 0 ? { localStorage } : {}),
+    ...(setupScript ? { setupScript } : {}),
+  };
+  return routeStateContractSchema.parse(merged);
 }
 
 async function writeBlockedEnvironmentReport(options: {
@@ -248,6 +280,7 @@ async function writeBlockedEnvironmentReport(options: {
     regionResults: [],
     domResults: [],
     textResults: [],
+    stateResults: [],
     failures: [{
       failureId: createId('failure'),
       category: 'blocked-environment',
@@ -382,21 +415,51 @@ function isToleratedFontRenderingDiff(
   return text?.status === 'passed' && dom?.status === 'passed' && !styleFailureNodes.has(region.nodeId);
 }
 
-function buildDomResults(spec: FidelitySpec, nodes: { nodeId: string; selector: string; box: Box; computed: Record<string, string> }[], tolerance: number): DomResult[] {
+export function buildDomResults(spec: FidelitySpec, nodes: { nodeId: string; selector: string; box: Box; computed: Record<string, string> }[], tolerance: number): DomResult[] {
   const byNode = new Map(nodes.map((node) => [node.nodeId, node]));
   const results: DomResult[] = [];
   for (const region of spec.regions) {
-    if (!region.nodeId || region.strictness === 'ignored') continue;
+    const mapping = mappingForRegion(region);
+    const selector = region.nodeId ? `[data-figma-node="${region.nodeId}"]` : `region:${region.regionId}`;
+    if (mapping === 'ignored') {
+      results.push({
+        ...(region.nodeId ? { nodeId: region.nodeId } : {}),
+        selector,
+        mapping,
+        status: 'skipped',
+        message: 'DOM mapping is ignored by fidelity spec',
+      });
+      continue;
+    }
+    if (!region.nodeId) {
+      results.push({
+        selector,
+        mapping,
+        status: mapping === 'required' ? 'missing' : 'skipped',
+        message: mapping === 'required'
+          ? 'Required DOM mapping has no Figma node id to query'
+          : 'Optional DOM mapping has no Figma node id and was skipped',
+      });
+      continue;
+    }
     const node = byNode.get(region.nodeId);
-    const selector = `[data-figma-node="${region.nodeId}"]`;
     if (!node) {
-      results.push({ nodeId: region.nodeId, selector, status: 'missing', message: 'Missing DOM element with data-figma-node' });
+      results.push({
+        nodeId: region.nodeId,
+        selector,
+        mapping,
+        status: mapping === 'required' ? 'missing' : 'skipped',
+        message: mapping === 'required'
+          ? 'Missing required DOM element with data-figma-node'
+          : 'Optional DOM element with data-figma-node is not present; mapping check skipped',
+      });
       continue;
     }
     const mismatch = boxMismatch(region.box, node.box, tolerance);
     results.push({
       nodeId: region.nodeId,
       selector: node.selector,
+      mapping,
       status: mismatch ? 'failed' : 'passed',
       box: node.box,
       computed: node.computed,
@@ -406,17 +469,60 @@ function buildDomResults(spec: FidelitySpec, nodes: { nodeId: string; selector: 
   return results;
 }
 
+export function buildDomMappingWarnings(results: DomResult[]): Warning[] {
+  return results.flatMap((result) => {
+    if (result.mapping !== 'optional' || result.status !== 'skipped') return [];
+    return [{
+      code: 'DOM_MAPPING_OPTIONAL_SKIPPED',
+      message: result.message || 'Optional DOM mapping was skipped.',
+      ...(result.nodeId ? { hint: `Add data-figma-node="${result.nodeId}" only if this container is stable and useful for targeted repair.` } : {}),
+    }];
+  });
+}
+
+function mappingForRegion(region: Region): DomMapping {
+  if (region.strictness === 'ignored') return 'ignored';
+  if (region.mapping) return region.mapping;
+  if (region.kind === 'text' || region.kind === 'image') return 'required';
+  return 'optional';
+}
+
 export function buildTextResults(spec: FidelitySpec, nodes: CapturedDomNode[], visibleText: string): TextResult[] {
   const byNode = new Map(nodes.map((node) => [node.nodeId, node]));
+  const mappingByNode = new Map(spec.regions.filter((region) => region.nodeId).map((region) => [region.nodeId!, mappingForRegion(region)]));
   const pageText = normalizeText(visibleText);
   const results: TextResult[] = [];
   for (const text of spec.texts) {
     const expected = normalizeText(text.text);
     if (!expected) continue;
     const selector = text.nodeId ? `[data-figma-node="${text.nodeId}"]` : undefined;
+    const mapping = text.nodeId ? mappingByNode.get(text.nodeId) : undefined;
+    if (mapping === 'ignored') {
+      results.push({
+        ...(text.nodeId ? { nodeId: text.nodeId } : {}),
+        ...(selector ? { selector } : {}),
+        status: 'skipped',
+        expectedText: text.text,
+        normalizedExpected: expected,
+        message: 'Text verification skipped because DOM mapping is ignored by fidelity spec',
+      });
+      continue;
+    }
     const node = text.nodeId ? byNode.get(text.nodeId) : undefined;
     if (!node) {
       const existsElsewhere = pageText.includes(expected);
+      if (existsElsewhere && mapping === 'optional') {
+        results.push({
+          ...(text.nodeId ? { nodeId: text.nodeId } : {}),
+          ...(selector ? { selector } : {}),
+          status: 'skipped',
+          expectedText: text.text,
+          normalizedExpected: expected,
+          normalizedActual: expected,
+          message: 'Expected text exists in page; optional DOM mapping is not present and was skipped',
+        });
+        continue;
+      }
       results.push({
         ...(text.nodeId ? { nodeId: text.nodeId } : {}),
         ...(selector ? { selector } : {}),
@@ -461,6 +567,26 @@ function buildTextFailures(results: TextResult[]): Failure[] {
       actual: { text: result.normalizedActual || '', status: result.status },
     }];
   });
+}
+
+export function buildStateFailures(results: StateResult[]): Failure[] {
+  return results.flatMap((result) => {
+    if (result.status !== 'failed') return [];
+    return [{
+      failureId: createId('failure'),
+      category: 'wrong-state' as const,
+      severity: stateFailureSeverity(result),
+      message: result.message || `Route state assertion failed: ${result.type}`,
+      ...(result.selector ? { selector: result.selector } : {}),
+      ...(result.expected ? { expected: result.expected } : {}),
+      ...(result.actual ? { actual: result.actual } : {}),
+    }];
+  });
+}
+
+function stateFailureSeverity(result: StateResult): Failure['severity'] {
+  if (result.type === 'wait-for-selector' || result.type === 'visible-text' || result.type === 'selector-visible' || result.type === 'selector-text') return 'high';
+  return 'medium';
 }
 
 export function buildAssetUsageFailures(assets: AssetEvidence[], usages: CapturedAssetUsage[]): Failure[] {

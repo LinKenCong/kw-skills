@@ -81,7 +81,9 @@ export function createAgentBrief(options: AgentBriefOptions): AgentBrief {
     tokenPolicy: {
       readFirst: [
         'agent-brief.json',
+        'wrong-state failures and report.stateResults before changing layout/CSS',
         'text-manifest.json for exact Figma copy before editing visible text',
+        'DOM mapping warnings before adding or moving data-figma-node attributes',
         'repair-plan.json only when a listed action needs more context',
         'report.json only for a listed failure or evidence path',
       ],
@@ -102,6 +104,7 @@ export function createAgentBrief(options: AgentBriefOptions): AgentBrief {
       failedRegionCount: options.report.regionResults.filter((region) => region.status === 'failed').length,
       failedDomCount: options.report.domResults.filter((result) => result.status === 'failed' || result.status === 'missing').length,
       failedTextCount: (options.report.textResults || []).filter((result) => result.status === 'failed' || result.status === 'missing' || result.status === 'mapping-missing').length,
+      failedStateCount: (options.report.stateResults || []).filter((result) => result.status === 'failed').length,
       warningCount: options.report.warnings.length,
     },
     artifactPaths: {
@@ -160,6 +163,7 @@ export function createCliSummary(brief: AgentBrief): Record<string, unknown> {
     failedRegionCount: brief.metrics.failedRegionCount,
     failedDomCount: brief.metrics.failedDomCount,
     failedTextCount: brief.metrics.failedTextCount || 0,
+    failedStateCount: brief.metrics.failedStateCount || 0,
     topFailures: brief.topFailures.slice(0, 5).map((failure) => ({
       category: failure.category,
       severity: failure.severity,
@@ -235,13 +239,22 @@ function countFailures(failures: Failure[]): Record<string, number> {
 function fallbackActions(report: VerifyReport): string[] {
   if (report.status === 'passed') return [`Route passed fidelity gates. Full-page diff ${(report.fullPage.diffRatio * 100).toFixed(2)}%.`];
   const categories = Object.entries(countFailures(report.failures)).map(([category, count]) => `${category}:${count}`).join(', ');
+  const wrongStateCount = report.failures.filter((failure) => failure.category === 'wrong-state').length;
+  const mappingWarningCount = report.warnings.filter((warning) => warning.code.startsWith('DOM_MAPPING_')).length;
   const textFailureCount = (report.textResults || []).filter((result) => result.status === 'failed' || result.status === 'missing' || result.status === 'mapping-missing').length;
-  return [
+  const actions = [
     `Open agent-brief topFailures first; full report has ${report.failures.length} failures (${categories || 'none'}).`,
+    wrongStateCount > 0
+      ? `Fix ${wrongStateCount} wrong-state failure(s) from report.stateResults before interpreting screenshot or layout diffs.`
+      : '',
     textFailureCount > 0
       ? `Fix ${textFailureCount} exact text-content failures from text-manifest.json before layout or typography tuning.`
       : 'Patch layout/state failures before typography, assets, colors, and overflow.',
+    mappingWarningCount > 0
+      ? `Treat ${mappingWarningCount} optional DOM mapping warning(s) as targeting guidance, not high-priority layout failures.`
+      : '',
   ];
+  return actions.filter(Boolean);
 }
 
 function compactStrings(values: string[], limit: number, maxLength: number): string[] {

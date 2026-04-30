@@ -1,5 +1,5 @@
 import { ArtifactStore } from '../artifact/store.js';
-import { fidelitySpecSchema, type FidelitySpec, type MinimalDesignIR, type RawExtraction } from '../schema.js';
+import { fidelitySpecSchema, routeStateContractSchema, type FidelitySpec, type MinimalDesignIR, type RawExtraction, type RouteStateContract } from '../schema.js';
 import { readJsonFile } from '../json.js';
 
 export const DEFAULT_THRESHOLDS = {
@@ -13,6 +13,7 @@ export function buildFidelitySpec(options: {
   ir: MinimalDesignIR;
   route?: string;
   viewport?: { width?: number; height?: number; dpr?: number };
+  routeState?: RouteStateContract;
   store?: ArtifactStore;
 }): FidelitySpec {
   const store = options.store || new ArtifactStore();
@@ -25,12 +26,14 @@ export function buildFidelitySpec(options: {
   }
   const width = options.viewport?.width || Math.round(options.ir.page.width || raw?.screenshots?.[0]?.width || 1440);
   const height = options.viewport?.height || Math.round(options.ir.page.height || raw?.screenshots?.[0]?.height || 900);
+  const routeState = options.routeState ? routeStateContractSchema.parse(options.routeState) : undefined;
   const spec = fidelitySpecSchema.parse({
     schemaVersion: 1,
     runId: options.runId,
     evidenceLevel: options.ir.evidenceLevel,
     route: options.route || '',
     viewport: { width, height, dpr: options.viewport?.dpr || 1 },
+    ...(routeState ? { routeState } : {}),
     baselineScreenshot,
     regions: options.ir.regions,
     texts: options.ir.texts,

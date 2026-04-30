@@ -44,6 +44,22 @@ test('repair planner prioritizes exact text content before layout tuning', () =>
   assert.match(plan.nextActions.join('\n'), /Exact Copy/);
 });
 
+test('repair planner makes wrong route state actionable before layout repair', () => {
+  const plan = createRepairPlan({
+    ...baseReport,
+    status: 'failed',
+    stateResults: [{ type: 'visible-text', status: 'failed', expected: { text: 'Checkout' }, actual: { visibleText: 'Cart' } }],
+    failures: [
+      { failureId: 'f2', category: 'layout-spacing', severity: 'critical', message: 'layout diff' },
+      { failureId: 'f1', category: 'wrong-state', severity: 'high', message: 'state mismatch', expected: { text: 'Checkout' }, actual: { visibleText: 'Cart' } },
+    ],
+  });
+  assert.equal(plan.worstFailures[0].category, 'wrong-state');
+  assert.match(plan.worstFailures[0].recommendedAction, /route state contract/);
+  assert.match(plan.worstFailures[0].recommendedAction, /Checkout/);
+  assert.match(plan.nextActions[0], /Fix route state before CSS/);
+});
+
 test('repair planner blocks on critical environment failure', () => {
   const plan = createRepairPlan({
     ...baseReport,
