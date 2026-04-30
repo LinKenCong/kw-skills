@@ -9,6 +9,7 @@ import { RuntimeState } from '../dist/service/state.js';
 
 const ADMIN_TOKEN = 'test_admin_token_123456789012345678901234';
 const PLUGIN_SESSION_ID = 'ps_1';
+const ONE_PIXEL_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/W8kAAAAASUVORK5CYII=';
 
 function makeApp() {
   const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'frr-service-'));
@@ -252,7 +253,7 @@ test('service accepts progress, artifact upload, and final extraction result wit
   const artifact = await json(await app.request(`/jobs/${job.jobId}/artifacts`, {
     method: 'POST',
     headers: jobHeaders(job),
-    body: JSON.stringify({ artifactId: 'shot_1', kind: 'screenshot', fileName: 'base.png', mediaType: 'image/png', dataBase64: Buffer.from('fake-png').toString('base64') }),
+    body: JSON.stringify({ artifactId: 'shot_1', kind: 'screenshot', fileName: 'base.png', mediaType: 'image/png', dataBase64: ONE_PIXEL_PNG_BASE64 }),
   }));
   assert.equal(artifact.ok, true);
   assert.equal(artifact.artifact.kind, 'screenshot');
@@ -291,7 +292,7 @@ test('terminal jobs reject later progress, artifacts, and results', async () => 
     body: JSON.stringify({ ok: true, result: validExtraction() }),
   });
   assert.equal(result.status, 409);
-  assert.equal((await json(result)).error.code, 'JOB_TERMINAL');
+  assert.equal((await json(result)).error.code, 'INVALID_JOB_TRANSITION');
 
   const progress = await app.request(`/jobs/${job.jobId}/progress`, {
     method: 'POST',
@@ -326,7 +327,7 @@ test('service attaches primary and fallback asset paths', async () => {
   await json(await app.request(`/jobs/${job.jobId}/artifacts`, {
     method: 'POST',
     headers: jobHeaders(job),
-    body: JSON.stringify({ artifactId: 'asset_png', kind: 'asset', fileName: 'icon.png', mediaType: 'image/png', dataBase64: Buffer.from('fake-png').toString('base64') }),
+    body: JSON.stringify({ artifactId: 'asset_png', kind: 'asset', fileName: 'icon.png', mediaType: 'image/png', dataBase64: ONE_PIXEL_PNG_BASE64 }),
   }));
 
   const result = await json(await app.request(`/jobs/${job.jobId}/result`, {

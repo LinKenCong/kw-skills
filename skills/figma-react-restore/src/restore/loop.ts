@@ -7,6 +7,7 @@ import { readJsonIfExists, writeJsonFile } from '../json.js';
 import { relativeArtifactPath } from '../paths.js';
 import { repairPlanSchema, restoreAttemptSchema, type RestoreAttempt, type VerifyReport } from '../schema.js';
 import { waitForRoute } from '../react/project.js';
+import { normalizeServiceError } from '../service/errors.js';
 import { createAgentBriefFromFiles } from '../summary/agent-brief.js';
 import { runVerification } from '../verify/report.js';
 import { createRepairPlanFromFile } from './repair-plan.js';
@@ -30,6 +31,7 @@ export type RestoreResult = {
 };
 
 const DEFAULT_MAX_ITERATIONS = 3;
+const DEV_COMMAND_SHUTDOWN_TIMEOUT_MS = 5000;
 
 export async function runRestoreAttempt(options: RestoreOptions, store = new ArtifactStore({ workspaceRoot: options.projectRoot })): Promise<RestoreResult> {
   const run = store.readRun(options.runId);
@@ -59,7 +61,11 @@ export async function runRestoreAttempt(options: RestoreOptions, store = new Art
   let devProcess: ReturnType<typeof execaCommand> | null = null;
   try {
     if (options.devCommand) {
-      devProcess = execaCommand(options.devCommand, { cwd: options.projectRoot, stdio: 'pipe' });
+      devProcess = execaCommand(options.devCommand, {
+        cwd: options.projectRoot,
+        stdio: 'pipe',
+        detached: true,
+      });
       await waitForRoute(options.route, { timeoutMs: 60000 }).catch(() => undefined);
     }
     const verifyOptions = {
@@ -120,17 +126,42 @@ export async function runRestoreAttempt(options: RestoreOptions, store = new Art
     writeFinalReport(store, options.runId, result);
     return result;
   } catch (error) {
-    const failed = restoreAttemptSchema.parse({ ...attempt, completedAt: nowIso(), status: 'blocked' });
+    const normalized = normalizeServiceError(error);
+    const failed = restoreAttemptSchema.parse({
+      ...attempt,
+      completedAt: nowIso(),
+      status: 'blocked',
+      error: {
+        code: normalized.code,
+        message: normalized.message,
+        recoverable: normalized.recoverable,
+        ...(normalized.hint ? { hint: normalized.hint } : {}),
+        ...(normalized.httpStatus ? { httpStatus: normalized.httpStatus } : {}),
+      },
+    });
     writeJsonFile(path.join(attemptDir, 'attempt.json'), failed);
+    appendAttempt(store, options.runId, failed);
+    writeFinalReport(store, options.runId, {
+      status: 'blocked',
+      attempt: failed,
+      blockedReason: `blocked-error: ${normalized.code}`,
+    });
     throw error;
   } finally {
     if (devProcess) {
-      devProcess.kill('SIGTERM');
+      await terminateDevProcess(devProcess, DEV_COMMAND_SHUTDOWN_TIMEOUT_MS);
     }
   }
 }
 
-type RestoreState = { attempts: Array<RestoreAttempt & { fullPageDiffRatio?: number; failedTextCount?: number }> };
+type RestoreState = {
+  attempts: Array<RestoreAttempt & {
+    fullPageDiffRatio?: number;
+    failedTextCount?: number;
+    errorCode?: string;
+    errorMessage?: string;
+  }>;
+};
 
 function nextAttemptIndex(store: ArtifactStore, runId: string): number {
   const state = readRestoreState(store, runId);
@@ -142,12 +173,18 @@ function readRestoreState(store: ArtifactStore, runId: string): RestoreState {
   return readJsonIfExists<RestoreState>(statePath) || { attempts: [] };
 }
 
-function appendAttempt(store: ArtifactStore, runId: string, attempt: RestoreAttempt, report: VerifyReport): void {
+function appendAttempt(store: ArtifactStore, runId: string, attempt: RestoreAttempt, report?: VerifyReport): void {
   const state = readRestoreState(store, runId);
   state.attempts.push({
     ...attempt,
-    fullPageDiffRatio: report.fullPage.diffRatio,
-    failedTextCount: report.textResults.filter((result) => result.status === 'failed' || result.status === 'missing' || result.status === 'mapping-missing').length,
+    ...(report ? {
+      fullPageDiffRatio: report.fullPage.diffRatio,
+      failedTextCount: report.textResults.filter((result) => result.status === 'failed' || result.status === 'missing' || result.status === 'mapping-missing').length,
+    } : {}),
+    ...(attempt.error ? {
+      errorCode: attempt.error.code,
+      errorMessage: attempt.error.message,
+    } : {}),
   });
   writeJsonFile(path.join(store.getRunDir(runId), 'restore', 'state.json'), state);
 }
@@ -223,4 +260,36 @@ function writeFinalReport(store: ArtifactStore, runId: string, result: RestoreRe
     ...(result.agentBriefPath ? { agentBriefPath: relativeArtifactPath(store.artifactRoot, result.agentBriefPath) } : {}),
     ...(result.blockedReason ? { blockedReason: result.blockedReason } : {}),
   });
+}
+
+async function terminateDevProcess(processHandle: ReturnType<typeof execaCommand>, timeoutMs: number): Promise<void> {
+  if (processHandle.exitCode !== null) return;
+  const pid = processHandle.pid;
+  if (typeof pid === 'number') {
+    try {
+      process.kill(-pid, 'SIGTERM');
+    } catch {
+      processHandle.kill('SIGTERM');
+    }
+  } else {
+    processHandle.kill('SIGTERM');
+  }
+  const exited = await Promise.race([
+    processHandle.then(() => true).catch(() => true),
+    delay(timeoutMs).then(() => false),
+  ]);
+  if (exited) return;
+  if (typeof pid === 'number') {
+    try {
+      process.kill(-pid, 'SIGKILL');
+      return;
+    } catch {
+      // Fall through to direct child kill when process group termination is unavailable.
+    }
+  }
+  processHandle.kill('SIGKILL');
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

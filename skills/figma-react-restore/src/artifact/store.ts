@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { artifactRefSchema, runSchema, type ArtifactKind, type ArtifactRef, type Run, type Warning } from '../schema.js';
+import { artifactRefSchema, artifactRelativePathSchema, runSchema, type ArtifactKind, type ArtifactRef, type Run, type Warning } from '../schema.js';
 import { createId, nowIso } from '../ids.js';
 import { readJsonFile, readJsonIfExists, writeJsonFile } from '../json.js';
 import { relativeArtifactPath, resolveArtifactRoot, resolveSafePath, resolveWorkspaceRoot, toPosixPath } from '../paths.js';
@@ -122,15 +122,23 @@ export class ArtifactStore {
     return parsed;
   }
 
-  resolveArtifactPath(refOrPath: string): string {
+  resolveArtifactPath(refOrPath: string, options: { allowAbsolute?: boolean } = {}): string {
     const cleaned = refOrPath.startsWith('artifact:') ? refOrPath.slice('artifact:'.length) : refOrPath;
-    if (path.isAbsolute(cleaned)) return cleaned;
+    if (path.isAbsolute(cleaned)) {
+      if (options.allowAbsolute) return cleaned;
+      throw new Error('Artifact path must be relative to artifact root');
+    }
+    artifactRelativePathSchema.parse(cleaned);
     return resolveSafePath(this.artifactRoot, cleaned);
   }
 
-  resolveRunPath(runId: string, refOrPath: string): string {
+  resolveRunPath(runId: string, refOrPath: string, options: { allowAbsolute?: boolean } = {}): string {
     const cleaned = refOrPath.startsWith('artifact:') ? refOrPath.slice('artifact:'.length) : refOrPath;
-    if (path.isAbsolute(cleaned)) return cleaned;
+    if (path.isAbsolute(cleaned)) {
+      if (options.allowAbsolute) return cleaned;
+      throw new Error('Run artifact path must be relative to the run directory');
+    }
+    artifactRelativePathSchema.parse(cleaned);
     return resolveSafePath(this.getRunDir(runId), cleaned);
   }
 

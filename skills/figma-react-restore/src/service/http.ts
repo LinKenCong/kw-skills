@@ -2,7 +2,6 @@ import path from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
 import { Hono, type Context } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
-import { z } from 'zod';
 import { createId } from '../ids.js';
 import {
   artifactUploadSchema,
@@ -14,9 +13,10 @@ import {
   type ArtifactRef,
   type RawExtraction,
 } from '../schema.js';
-import { inferExtension, sanitizeFileName } from '../artifact/store.js';
-import { RuntimeStateError, type RuntimeEvent, type RuntimeJob, type RuntimeState } from './state.js';
+import { inferExtension, sanitizeFileName, sanitizeSegment } from '../artifact/store.js';
+import { type RuntimeEvent, type RuntimeJob, type RuntimeState } from './state.js';
 import { SERVICE_VERSION } from './lockfile.js';
+import { ServiceHttpError, httpStatusForError, serializeServiceError } from './errors.js';
 
 const MAX_JSON_BODY_BYTES = 35 * 1024 * 1024;
 const MAX_ARTIFACT_BYTES = 24 * 1024 * 1024;
@@ -55,8 +55,8 @@ export function createRuntimeApp(state: RuntimeState): Hono {
   app.use('*', bodyLimit({ maxSize: MAX_JSON_BODY_BYTES }));
 
   app.onError((error, c) => {
-    const status = errorStatus(error);
-    return c.json({ ok: false, error: normalizeError(error) }, status);
+    const status = toResponseStatus(httpStatusForError(error));
+    return c.json({ ok: false, error: serializeServiceError(error) }, status);
   });
 
   app.get('/health', (c) => {
@@ -83,16 +83,26 @@ export function createRuntimeApp(state: RuntimeState): Hono {
   });
 
   app.post('/sessions/register', async (c) => {
-    const payload = sessionRegisterSchema.parse(await c.req.json());
+    const payload = sessionRegisterSchema.parse(await parseJson(c));
     const session = state.registerSession(payload);
     return c.json({ ok: true, session });
   });
 
   app.get('/events', (c) => {
     const sessionId = c.req.query('sessionId');
-    if (!sessionId) return c.json({ ok: false, error: { code: 'SESSION_REQUIRED', message: 'sessionId query param is required' } }, 400);
+    if (!sessionId) {
+      throw new ServiceHttpError('SESSION_REQUIRED', 'sessionId query param is required', {
+        httpStatus: 400,
+        recoverable: true,
+        hint: 'Pass the plugin session id returned by /sessions/register.',
+      });
+    }
     if (!state.sessions.has(sessionId)) {
-      return c.json({ ok: false, error: { code: 'SESSION_NOT_FOUND', message: `Unknown session: ${sessionId}` } }, 404);
+      throw new ServiceHttpError('SESSION_NOT_FOUND', `Unknown session: ${sessionId}`, {
+        httpStatus: 404,
+        recoverable: true,
+        hint: 'Register the plugin session before opening the event stream.',
+      });
     }
     return new Response(createEventStream(state, sessionId), {
       headers: {
@@ -106,7 +116,7 @@ export function createRuntimeApp(state: RuntimeState): Hono {
 
   app.post('/jobs', async (c) => {
     requireAdmin(c, state);
-    const payload = jobCreateSchema.parse(await c.req.json());
+    const payload = jobCreateSchema.parse(await parseJson(c));
     const job = state.createJob({
       capability: payload.capability,
       options: payload.options,
@@ -124,8 +134,13 @@ export function createRuntimeApp(state: RuntimeState): Hono {
       jobs = sessionId ? state.listJobsForSession(sessionId) : [...state.jobs.values()];
     } else {
       if (!sessionId) {
-        throw new ServiceHttpError('ADMIN_AUTH_REQUIRED', 'Admin token is required for job queries without sessionId', 401);
+        throw new ServiceHttpError('ADMIN_AUTH_REQUIRED', 'Admin token is required for job queries without sessionId', {
+          httpStatus: 401,
+          recoverable: true,
+          hint: 'Provide x-frr-admin-token or include sessionId for plugin polling.',
+        });
       }
+      state.touchSession(sessionId);
       includeSecret = true;
       jobs = state
         .listJobsForSession(sessionId)
@@ -143,7 +158,7 @@ export function createRuntimeApp(state: RuntimeState): Hono {
 
   app.post('/jobs/:jobId/progress', async (c) => {
     requireJobAccess(c, state, c.req.param('jobId'));
-    const progress = jobProgressSchema.parse(await c.req.json());
+    const progress = jobProgressSchema.parse(await parseJson(c));
     const job = state.addProgress(c.req.param('jobId'), progress);
     return c.json({ ok: true, job: serializeJob(job) });
   });
@@ -152,18 +167,36 @@ export function createRuntimeApp(state: RuntimeState): Hono {
     const jobId = c.req.param('jobId');
     const job = requireJobAccess(c, state, jobId);
     state.assertActiveJob(jobId, 'add artifacts');
-    if (!job.runId) throw new Error(`Job has no run: ${jobId}`);
-    const payload = artifactUploadSchema.parse(await c.req.json());
+    if (!job.runId) {
+      throw new ServiceHttpError('JOB_RUN_MISSING', `Job has no run: ${jobId}`, {
+        httpStatus: 500,
+        recoverable: false,
+      });
+    }
+    const payload = artifactUploadSchema.parse(await parseJson(c));
     if (!payload.mediaType) {
-      return c.json({ ok: false, error: { code: 'MEDIA_TYPE_REQUIRED', message: 'Artifact mediaType is required' } }, 400);
+      throw new ServiceHttpError('MEDIA_TYPE_REQUIRED', 'Artifact mediaType is required', {
+        httpStatus: 400,
+        recoverable: true,
+        hint: `Use one of: ${[...ALLOWED_MEDIA_TYPES].sort().join(', ')}`,
+      });
     }
     if (!ALLOWED_MEDIA_TYPES.has(payload.mediaType)) {
-      return c.json({ ok: false, error: { code: 'UNSUPPORTED_MEDIA_TYPE', message: `Unsupported media type: ${payload.mediaType}` } }, 400);
+      throw new ServiceHttpError('UNSUPPORTED_MEDIA_TYPE', `Unsupported media type: ${payload.mediaType}`, {
+        httpStatus: 415,
+        recoverable: true,
+        hint: `Use one of: ${[...ALLOWED_MEDIA_TYPES].sort().join(', ')}`,
+      });
     }
     const buffer = Buffer.from(payload.dataBase64, 'base64');
     if (buffer.length > MAX_ARTIFACT_BYTES) {
-      return c.json({ ok: false, error: { code: 'ARTIFACT_TOO_LARGE', message: `Artifact exceeds ${MAX_ARTIFACT_BYTES} bytes` } }, 413);
+      throw new ServiceHttpError('ARTIFACT_TOO_LARGE', `Artifact exceeds ${MAX_ARTIFACT_BYTES} bytes`, {
+        httpStatus: 413,
+        recoverable: true,
+        hint: 'Upload a smaller artifact or split the payload.',
+      });
     }
+    assertMediaTypeMatches(payload.mediaType, buffer);
     const artifactId = payload.artifactId || createId('art');
     const relativePath = chooseArtifactPath(payload.path, payload.fileName, payload.mediaType, artifactId, payload.kind);
     const artifactInput = {
@@ -182,8 +215,13 @@ export function createRuntimeApp(state: RuntimeState): Hono {
     const jobId = c.req.param('jobId');
     const job = requireJobAccess(c, state, jobId);
     state.assertActiveJob(jobId, 'finish');
-    if (!job.runId) throw new Error(`Job has no run: ${jobId}`);
-    const payload = jobResultSchema.parse(await c.req.json());
+    if (!job.runId) {
+      throw new ServiceHttpError('JOB_RUN_MISSING', `Job has no run: ${jobId}`, {
+        httpStatus: 500,
+        recoverable: false,
+      });
+    }
+    const payload = jobResultSchema.parse(await parseJson(c));
     if (!payload.ok) {
       state.store.updateRun(job.runId, { status: payload.error.recoverable ? 'blocked' : 'failed' });
       const failed = state.failJob(jobId, payload.error);
@@ -238,6 +276,7 @@ function createEventStream(state: RuntimeState, sessionId: string): ReadableStre
       const unsubscribe = state.subscribe(sessionId, subscriber);
       safeSend('ready', { ok: true, sessionId });
       const interval = setInterval(() => {
+        state.touchSession(sessionId);
         safeSend('ping', { type: 'ping', time: new Date().toISOString() });
       }, 15000);
       cleanup = () => {
@@ -256,23 +295,21 @@ function formatSse(event: string, data: unknown): string {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
-class ServiceHttpError extends Error {
-  readonly code: string;
-  readonly status: 401 | 403;
-
-  constructor(code: string, message: string, status: 401 | 403) {
-    super(message);
-    this.name = 'ServiceHttpError';
-    this.code = code;
-    this.status = status;
-  }
-}
-
 function requireAdmin(c: Context, state: RuntimeState): void {
   const token = c.req.header(ADMIN_TOKEN_HEADER);
-  if (!token) throw new ServiceHttpError('ADMIN_AUTH_REQUIRED', 'Admin token is required', 401);
+  if (!token) {
+    throw new ServiceHttpError('ADMIN_AUTH_REQUIRED', 'Admin token is required', {
+      httpStatus: 401,
+      recoverable: true,
+      hint: 'Read the runtime service lockfile and send x-frr-admin-token.',
+    });
+  }
   if (!constantTimeEqual(token, state.adminToken)) {
-    throw new ServiceHttpError('ADMIN_AUTH_INVALID', 'Admin token is invalid', 403);
+    throw new ServiceHttpError('ADMIN_AUTH_INVALID', 'Admin token is invalid', {
+      httpStatus: 403,
+      recoverable: false,
+      hint: 'Use the token from the current service lockfile.',
+    });
   }
 }
 
@@ -280,7 +317,11 @@ function hasAdmin(c: Context, state: RuntimeState): boolean {
   const token = c.req.header(ADMIN_TOKEN_HEADER);
   if (!token) return false;
   if (!constantTimeEqual(token, state.adminToken)) {
-    throw new ServiceHttpError('ADMIN_AUTH_INVALID', 'Admin token is invalid', 403);
+    throw new ServiceHttpError('ADMIN_AUTH_INVALID', 'Admin token is invalid', {
+      httpStatus: 403,
+      recoverable: false,
+      hint: 'Use the token from the current service lockfile.',
+    });
   }
   return true;
 }
@@ -289,12 +330,21 @@ function requireJobAccess(c: Context, state: RuntimeState, jobId: string): Runti
   const sessionId = c.req.header(PLUGIN_SESSION_HEADER);
   const jobSecret = c.req.header(JOB_SECRET_HEADER);
   if (!sessionId || !jobSecret) {
-    throw new ServiceHttpError('JOB_SECRET_REQUIRED', 'Plugin session id and job secret are required', 401);
+    throw new ServiceHttpError('JOB_SECRET_REQUIRED', 'Plugin session id and job secret are required', {
+      httpStatus: 401,
+      recoverable: true,
+      hint: 'Send x-frr-plugin-session-id and x-frr-job-secret from the job polling response.',
+    });
   }
   const job = state.getJob(jobId);
   if (job.sessionId !== sessionId || !constantTimeEqual(jobSecret, job.jobSecret)) {
-    throw new ServiceHttpError('JOB_SECRET_INVALID', 'Job owner or secret is invalid', 403);
+    throw new ServiceHttpError('JOB_SECRET_INVALID', 'Job owner or secret is invalid', {
+      httpStatus: 403,
+      recoverable: false,
+      hint: 'Only the plugin session that owns the job can mutate it.',
+    });
   }
+  state.touchSession(sessionId);
   return job;
 }
 
@@ -311,33 +361,13 @@ function serializeJob(job: RuntimeJob, options: { includeSecret?: boolean } = {}
   return safeJob;
 }
 
-function errorStatus(error: unknown): 400 | 401 | 403 | 404 | 409 | 500 {
-  if (error instanceof z.ZodError) return 400;
-  if (error instanceof ServiceHttpError) return error.status;
-  if (error instanceof RuntimeStateError) {
-    if (error.status === 404) return 404;
-    if (error.status === 409) return 409;
-  }
-  return 500;
-}
-
-function normalizeError(error: unknown): { code: string; message: string; details?: unknown } {
-  if (error instanceof z.ZodError) {
-    return { code: 'VALIDATION_ERROR', message: 'Invalid request payload', details: error.issues };
-  }
-  if (error instanceof ServiceHttpError || error instanceof RuntimeStateError) {
-    return { code: error.code, message: error.message };
-  }
-  if (error instanceof Error) return { code: 'INTERNAL_ERROR', message: error.message };
-  return { code: 'INTERNAL_ERROR', message: String(error) };
-}
-
 function chooseArtifactPath(inputPath: string | undefined, fileName: string | undefined, mediaType: string | undefined, artifactId: string, kind: string): string {
   if (inputPath) return inputPath.replace(/^\/+/, '');
   const extension = inferExtension(mediaType, path.extname(fileName || '').replace(/^\./, '') || 'bin');
   const safeName = sanitizeFileName(fileName || `${artifactId}.${extension}`);
+  const safeArtifactId = sanitizeSegment(artifactId);
   const directory = kind === 'screenshot' ? 'screenshots' : kind === 'asset' ? 'assets' : 'uploads';
-  return `${directory}/${artifactId}-${safeName}`;
+  return `${directory}/${safeArtifactId}-${safeName}`;
 }
 
 function compactArtifact(input: {
@@ -378,4 +408,73 @@ function attachArtifactPaths(extraction: RawExtraction, refs: ArtifactRef[]): Ra
     };
   });
   return { ...extraction, screenshots, assets };
+}
+
+async function parseJson(c: Context): Promise<unknown> {
+  try {
+    return await c.req.json();
+  } catch (error) {
+    throw new ServiceHttpError('INVALID_JSON', 'Request body must be valid JSON', {
+      httpStatus: 400,
+      recoverable: true,
+      hint: 'Send a valid application/json request body.',
+      cause: error,
+    });
+  }
+}
+
+function assertMediaTypeMatches(mediaType: string, buffer: Buffer): void {
+  const sniffed = sniffMediaType(buffer);
+  if (isCompatibleMediaType(mediaType, sniffed)) return;
+  throw new ServiceHttpError('MEDIA_TYPE_MISMATCH', `Artifact bytes do not match declared media type: ${mediaType}`, {
+    httpStatus: 422,
+    recoverable: true,
+    hint: sniffed ? `Detected ${sniffed}; declare the detected type or upload matching bytes.` : 'Upload PNG, JPEG, GIF, SVG, JSON, or UTF-8 text bytes.',
+    details: { declared: mediaType, detected: sniffed },
+  });
+}
+
+function sniffMediaType(buffer: Buffer): string | null {
+  if (buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return 'image/png';
+  }
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return 'image/jpeg';
+  if (buffer.length >= 6 && (buffer.subarray(0, 6).toString('ascii') === 'GIF87a' || buffer.subarray(0, 6).toString('ascii') === 'GIF89a')) {
+    return 'image/gif';
+  }
+  const text = buffer.toString('utf8').trimStart();
+  if (text.startsWith('<svg') || (text.startsWith('<?xml') && text.includes('<svg'))) return 'image/svg+xml';
+  if (looksLikeJson(text)) return 'application/json';
+  if (looksLikeText(buffer)) return 'text/plain';
+  return null;
+}
+
+function isCompatibleMediaType(declared: string, sniffed: string | null): boolean {
+  if (!sniffed) return false;
+  if (declared === sniffed) return true;
+  if (declared === 'text/plain' && (sniffed === 'application/json' || sniffed === 'image/svg+xml')) return true;
+  return false;
+}
+
+function looksLikeJson(text: string): boolean {
+  if (!text || !['{', '['].includes(text[0] || '')) return false;
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function looksLikeText(buffer: Buffer): boolean {
+  if (buffer.includes(0)) return false;
+  const text = buffer.toString('utf8');
+  return !text.includes('\uFFFD');
+}
+
+function toResponseStatus(status: number): 400 | 401 | 403 | 404 | 409 | 413 | 415 | 422 | 424 | 500 {
+  if (status === 400 || status === 401 || status === 403 || status === 404 || status === 409 || status === 413 || status === 415 || status === 422 || status === 424) {
+    return status;
+  }
+  return 500;
 }

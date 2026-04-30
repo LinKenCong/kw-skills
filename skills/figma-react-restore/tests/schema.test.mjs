@@ -50,6 +50,10 @@ test('schemas accept minimal valid V1 payloads', () => {
     url: 'http://127.0.0.1:49327',
     adminToken: 'test_admin_token_123456789012345678901234',
     startedAt: new Date().toISOString(),
+    hostname: 'localhost',
+    createdByCommand: 'figma-react-restore service start',
+    lastHeartbeatAt: new Date().toISOString(),
+    ownerPid: process.pid,
     workspaceRoot: '/tmp/project',
     artifactRoot: '/tmp/project/.figma-react-restore',
   });

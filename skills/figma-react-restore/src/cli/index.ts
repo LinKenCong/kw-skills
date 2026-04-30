@@ -14,6 +14,7 @@ import { routeStateContractSchema, type RouteStateContract } from '../schema.js'
 import { assertReactProjectRoot } from '../react/project.js';
 import { runRestoreAttempt } from '../restore/loop.js';
 import { startDevRuntimeService } from '../service/dev.js';
+import { ServiceError, normalizeServiceError } from '../service/errors.js';
 import { isServiceLockAlive, readServiceLock, removeServiceLock } from '../service/lockfile.js';
 import { startRuntimeService } from '../service/index.js';
 import { readServiceHealth, stopRuntimeService, validateServiceHealth } from '../service/control.js';
@@ -44,7 +45,12 @@ service.command('start')
   .action(wrap(async (options) => {
     const projectRoot = path.resolve(options.project);
     assertReactProjectRoot(projectRoot);
-    startRuntimeService({ workspaceRoot: projectRoot, port: DEFAULT_PORT, silent: Boolean(options.silent) });
+    await startRuntimeService({
+      workspaceRoot: projectRoot,
+      port: DEFAULT_PORT,
+      silent: Boolean(options.silent),
+      createdByCommand: process.argv.join(' '),
+    });
   }));
 service.command('dev')
   .description('Start runtime service with TypeScript watch rebuild and automatic service restart')
@@ -373,8 +379,23 @@ async function serviceFetch(lock: ServiceLock, endpoint: string, options: { meth
   };
   const response = await fetch(`${lock.url}${endpoint}`, init);
   const data = await response.json() as unknown;
-  if (!response.ok) throw new Error(JSON.stringify(data));
+  if (!response.ok) throw parseServiceFetchError(data, response.status);
   return data;
+}
+
+function parseServiceFetchError(data: unknown, status: number): ServiceError {
+  const payload = (data && typeof data === 'object') ? (data as { error?: unknown }) : undefined;
+  const error = (payload?.error && typeof payload.error === 'object')
+    ? payload.error as { code?: unknown; message?: unknown; recoverable?: unknown; hint?: unknown; details?: unknown; httpStatus?: unknown }
+    : undefined;
+  const code = typeof error?.code === 'string' ? error.code : 'SERVICE_REQUEST_FAILED';
+  const message = typeof error?.message === 'string' ? error.message : `Runtime service request failed with HTTP ${status}`;
+  return new ServiceError(code, message, {
+    httpStatus: Number.isFinite(Number(error?.httpStatus)) ? Number(error?.httpStatus) : status,
+    recoverable: typeof error?.recoverable === 'boolean' ? error.recoverable : status < 500,
+    ...(typeof error?.hint === 'string' ? { hint: error.hint } : {}),
+    ...(error?.details !== undefined ? { details: error.details } : {}),
+  });
 }
 
 async function waitForJob(lock: ServiceLock, jobId: string, timeoutMs: number): Promise<ServiceJob> {
@@ -400,7 +421,17 @@ function wrap<T extends unknown[]>(fn: (...args: T) => Promise<void>): (...args:
     try {
       await fn(...args);
     } catch (error: unknown) {
-      printJson({ ok: false, error: error instanceof Error ? { code: 'ERROR', message: error.message } : { code: 'ERROR', message: String(error) } });
+      const normalized = normalizeServiceError(error);
+      printJson({
+        ok: false,
+        error: {
+          code: normalized.code,
+          message: normalized.message,
+          ...(normalized.hint ? { hint: normalized.hint } : {}),
+          ...(normalized.recoverable !== undefined ? { recoverable: normalized.recoverable } : {}),
+          ...(normalized.httpStatus ? { httpStatus: normalized.httpStatus } : {}),
+        },
+      });
       process.exitCode = 1;
     }
   };

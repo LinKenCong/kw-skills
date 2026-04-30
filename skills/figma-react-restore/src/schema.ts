@@ -1,5 +1,37 @@
 import { z } from 'zod';
 
+export const ARTIFACT_PATH_MAX_LENGTH = 1024;
+export const ARTIFACT_UPLOAD_BASE64_MAX_LENGTH = 32 * 1024 * 1024;
+export const ARTIFACT_ID_MAX_LENGTH = 128;
+export const ARTIFACT_FILE_NAME_MAX_LENGTH = 180;
+
+export function isArtifactRelativePath(value: string): boolean {
+  if (!value || value.length > ARTIFACT_PATH_MAX_LENGTH) return false;
+  if (value.includes('\0') || value.includes('\\')) return false;
+  if (value.startsWith('/') || value.startsWith('//') || /^[A-Za-z]:\//.test(value)) return false;
+  const segments = value.split('/');
+  return segments.every((segment) => segment.length > 0 && segment !== '.' && segment !== '..');
+}
+
+export function isBase64Payload(value: string): boolean {
+  if (!value || value.length > ARTIFACT_UPLOAD_BASE64_MAX_LENGTH) return false;
+  if (value.length % 4 !== 0) return false;
+  return /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value);
+}
+
+export const artifactRelativePathSchema = z.string()
+  .min(1)
+  .max(ARTIFACT_PATH_MAX_LENGTH)
+  .refine(isArtifactRelativePath, 'Artifact path must be a POSIX path relative to artifact root without "." or ".." segments');
+
+export const artifactIdSchema = z.string().min(1).max(ARTIFACT_ID_MAX_LENGTH);
+export const artifactFileNameSchema = z.string().min(1).max(ARTIFACT_FILE_NAME_MAX_LENGTH);
+export const mediaTypeSchema = z.string().min(1).max(128);
+export const base64DataSchema = z.string()
+  .min(1)
+  .max(ARTIFACT_UPLOAD_BASE64_MAX_LENGTH)
+  .refine(isBase64Payload, 'dataBase64 must be standard padded base64');
+
 export const warningSchema = z.object({
   code: z.string(),
   message: z.string(),
@@ -10,6 +42,7 @@ export type Warning = z.infer<typeof warningSchema>;
 export const errorPayloadSchema = z.object({
   code: z.string(),
   message: z.string(),
+  httpStatus: z.number().int().min(100).max(599).optional(),
   recoverable: z.boolean().optional(),
   hint: z.string().optional(),
 });
@@ -31,11 +64,11 @@ export const artifactKindSchema = z.enum([
 export type ArtifactKind = z.infer<typeof artifactKindSchema>;
 
 export const artifactRefSchema = z.object({
-  artifactId: z.string(),
+  artifactId: artifactIdSchema,
   kind: artifactKindSchema,
-  path: z.string(),
+  path: artifactRelativePathSchema,
   contentHash: z.string().optional(),
-  mediaType: z.string().optional(),
+  mediaType: mediaTypeSchema.optional(),
   sourceNodeId: z.string().optional(),
   sourcePageId: z.string().optional(),
 });
@@ -467,6 +500,7 @@ export const restoreAttemptSchema = z.object({
   repairPlanPath: z.string().optional(),
   agentBriefPath: z.string().optional(),
   patchSummaryPath: z.string().optional(),
+  error: errorPayloadSchema.optional(),
 });
 export type RestoreAttempt = z.infer<typeof restoreAttemptSchema>;
 
@@ -622,22 +656,25 @@ export const sessionRegisterSchema = z.object({
 });
 export type SessionRegister = z.infer<typeof sessionRegisterSchema>;
 
+export const jobCapabilitySchema = z.enum(['extract.selection']);
+export type JobCapability = z.infer<typeof jobCapabilitySchema>;
+
 export const jobCreateSchema = z.object({
-  capability: z.string(),
+  capability: jobCapabilitySchema,
   sessionId: z.string().optional(),
   options: z.record(z.unknown()).default({}),
 });
 export type JobCreate = z.infer<typeof jobCreateSchema>;
 
 export const artifactUploadSchema = z.object({
-  artifactId: z.string().optional(),
+  artifactId: artifactIdSchema.optional(),
   kind: artifactKindSchema,
-  fileName: z.string().optional(),
-  path: z.string().optional(),
-  mediaType: z.string().optional(),
+  fileName: artifactFileNameSchema.optional(),
+  path: artifactRelativePathSchema.optional(),
+  mediaType: mediaTypeSchema.optional(),
   sourceNodeId: z.string().optional(),
   sourcePageId: z.string().optional(),
-  dataBase64: z.string(),
+  dataBase64: base64DataSchema,
 });
 export type ArtifactUpload = z.infer<typeof artifactUploadSchema>;
 
@@ -662,6 +699,10 @@ export const serviceLockSchema = z.object({
   url: z.string(),
   adminToken: z.string().min(32),
   startedAt: z.string(),
+  hostname: z.string().min(1),
+  createdByCommand: z.string().min(1).max(512),
+  lastHeartbeatAt: z.string(),
+  ownerPid: z.number().int().positive().optional(),
   workspaceRoot: z.string(),
   artifactRoot: z.string(),
 });

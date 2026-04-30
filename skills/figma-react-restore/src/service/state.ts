@@ -1,7 +1,8 @@
 import { createId, nowIso } from '../ids.js';
-import type { ArtifactRef, ErrorPayload, JobProgress, SessionRegister } from '../schema.js';
+import type { ArtifactRef, ErrorPayload, JobCapability, JobProgress, SessionRegister } from '../schema.js';
 import { ArtifactStore } from '../artifact/store.js';
 import { createRuntimeSecret } from './lockfile.js';
+import { ServiceError } from './errors.js';
 
 export type RuntimeSession = SessionRegister & {
   connected: boolean;
@@ -14,7 +15,7 @@ export type RuntimeJobStatus = 'pending' | 'running' | 'completed' | 'failed' | 
 export type RuntimeJob = {
   jobId: string;
   jobSecret: string;
-  capability: string;
+  capability: JobCapability;
   sessionId: string;
   status: RuntimeJobStatus;
   options: Record<string, unknown>;
@@ -40,15 +41,14 @@ export type EventSubscriber = {
 const SESSION_TTL_MS = 15_000;
 const TERMINAL_JOB_STATUSES = new Set<RuntimeJobStatus>(['completed', 'failed', 'canceled']);
 
-export class RuntimeStateError extends Error {
-  readonly code: string;
-  readonly status: number;
-
-  constructor(code: string, message: string, status: number) {
-    super(message);
+export class RuntimeStateError extends ServiceError {
+  constructor(code: string, message: string, status: number, options: { recoverable?: boolean; hint?: string } = {}) {
+    super(code, message, {
+      httpStatus: status,
+      ...(options.recoverable !== undefined ? { recoverable: options.recoverable } : {}),
+      ...(options.hint ? { hint: options.hint } : {}),
+    });
     this.name = 'RuntimeStateError';
-    this.code = code;
-    this.status = status;
   }
 }
 
@@ -87,21 +87,37 @@ export class RuntimeState {
     if (sessionId) {
       const session = this.sessions.get(sessionId);
       if (!session || !session.connected) {
-        throw new RuntimeStateError('SESSION_NOT_CONNECTED', `Plugin session not connected: ${sessionId}`, 409);
+        throw new RuntimeStateError('SESSION_NOT_CONNECTED', `Plugin session not connected: ${sessionId}`, 424, {
+          recoverable: true,
+          hint: 'Open the Figma plugin or choose a connected session id.',
+        });
       }
       return session;
     }
     const connected = this.listSessions().filter((session) => session.connected);
-    if (connected.length === 0) throw new RuntimeStateError('NO_PLUGIN_SESSION', 'No Figma plugin session connected', 409);
+    if (connected.length === 0) {
+      throw new RuntimeStateError('NO_PLUGIN_SESSION', 'No Figma plugin session connected', 409, {
+        recoverable: true,
+        hint: 'Open the Figma React Restore plugin and keep it connected, then retry.',
+      });
+    }
     if (connected.length > 1) {
-      throw new RuntimeStateError('MULTIPLE_PLUGIN_SESSIONS', 'Multiple plugin sessions connected; pass --session <id>', 409);
+      throw new RuntimeStateError('MULTIPLE_PLUGIN_SESSIONS', 'Multiple plugin sessions connected; pass --session <id>', 409, {
+        recoverable: true,
+        hint: 'Pass --session with the intended pluginSessionId.',
+      });
     }
     const session = connected[0];
-    if (!session) throw new RuntimeStateError('NO_PLUGIN_SESSION', 'No Figma plugin session connected', 409);
+    if (!session) {
+      throw new RuntimeStateError('NO_PLUGIN_SESSION', 'No Figma plugin session connected', 409, {
+        recoverable: true,
+        hint: 'Open the Figma React Restore plugin and keep it connected, then retry.',
+      });
+    }
     return session;
   }
 
-  createJob(input: { capability: string; sessionId?: string; options?: Record<string, unknown> }): RuntimeJob {
+  createJob(input: { capability: JobCapability; sessionId?: string; options?: Record<string, unknown> }): RuntimeJob {
     const session = this.chooseSession(input.sessionId);
     const run = this.store.createRun('extract', {
       capability: input.capability,
@@ -128,7 +144,12 @@ export class RuntimeState {
 
   getJob(jobId: string): RuntimeJob {
     const job = this.jobs.get(jobId);
-    if (!job) throw new RuntimeStateError('JOB_NOT_FOUND', `Unknown job: ${jobId}`, 404);
+    if (!job) {
+      throw new RuntimeStateError('JOB_NOT_FOUND', `Unknown job: ${jobId}`, 404, {
+        recoverable: false,
+        hint: 'Confirm the job id belongs to this runtime service instance.',
+      });
+    }
     return job;
   }
 
@@ -183,11 +204,18 @@ export class RuntimeState {
     const set = this.subscribers.get(sessionId) || new Set<EventSubscriber>();
     set.add(subscriber);
     this.subscribers.set(sessionId, set);
+    this.touchSession(sessionId);
     return () => {
       const current = this.subscribers.get(sessionId);
       current?.delete(subscriber);
       if (current && current.size === 0) this.subscribers.delete(sessionId);
     };
+  }
+
+  touchSession(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    this.sessions.set(sessionId, { ...session, connected: true, lastSeenAt: nowIso() });
   }
 
   emit(sessionId: string, event: RuntimeEvent): void {
@@ -198,6 +226,10 @@ export class RuntimeState {
 
   activeJobCount(): number {
     return [...this.jobs.values()].filter((job) => job.status === 'pending' || job.status === 'running').length;
+  }
+
+  connectedSessionCount(): number {
+    return this.listSessions().filter((session) => session.connected).length;
   }
 
   private pruneStaleSessions(): void {
@@ -217,8 +249,9 @@ export function isTerminalJobStatus(status: RuntimeJobStatus): boolean {
 function assertJobActive(job: RuntimeJob, action: string): void {
   if (!isTerminalJobStatus(job.status)) return;
   throw new RuntimeStateError(
-    'JOB_TERMINAL',
+    'INVALID_JOB_TRANSITION',
     `Cannot ${action} terminal job ${job.jobId} with status ${job.status}`,
-    409
+    409,
+    { recoverable: false, hint: 'Create a new job instead of mutating a terminal job.' }
   );
 }
