@@ -267,6 +267,8 @@ program.command('restore')
   .option('--wait-ms <ms>', 'Extra wait before screenshot', parseIntOption, 0)
   .option('--responsive-smoke', 'Run opt-in mobile/tablet responsive smoke captures on each attempt')
   .option('--responsive-viewport <spec>', 'Responsive smoke viewport name:WIDTHxHEIGHT[@DPR]; repeatable', collectOption, [])
+  .option('--archive-final-artifacts', 'Write restore/archive manifest for final report + latest report/brief/plan (default: true)')
+  .option('--no-archive-final-artifacts', 'Disable restore/archive final artifact manifest output')
   .action(wrap(async (options) => {
     const projectRoot = path.resolve(options.project);
     const responsiveViewports = parseResponsiveViewportOptions(stringArray(options.responsiveViewport));
@@ -278,6 +280,7 @@ program.command('restore')
       maxIterations: Number(options.maxIterations),
       waitMs: Number(options.waitMs),
       responsiveSmoke: Boolean(options.responsiveSmoke),
+      archiveFinalArtifacts: options.archiveFinalArtifacts !== false,
       ...(responsiveViewports.length > 0 ? { responsiveViewports } : {}),
     }, new ArtifactStore({ workspaceRoot: projectRoot }));
     printJson({ ok: result.status === 'passed', ...result });

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { buildDomMappingWarnings, buildDomResults, buildStateFailures, defaultResponsiveSmokeViewports, runVerification } from '../dist/verify/report.js';
+import { buildDomMappingWarnings, buildDomResults, buildStateFailures, defaultResponsiveSmokeViewports, resolveRegionThreshold, runVerification } from '../dist/verify/report.js';
 
 function makeSpecRoot() {
   const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'frr-verify-project-'));
@@ -97,4 +97,13 @@ test('responsive smoke exposes opt-in mobile and tablet defaults', () => {
   assert.deepEqual(viewports.map((item) => item.name), ['mobile', 'tablet']);
   assert.equal(viewports[0].viewport.width, 390);
   assert.equal(viewports[0].viewport.dpr, 2);
+});
+
+test('region strictness resolves per-region threshold with default as upper bound', () => {
+  const textStrict = resolveRegionThreshold({ regionId: 'title', nodeId: 't1', kind: 'text', box: { x: 0, y: 0, w: 10, h: 10 }, strictness: 'strict' }, 0.03);
+  const imagePerceptual = resolveRegionThreshold({ regionId: 'hero', nodeId: 'img1', kind: 'image', name: 'Hero Background', box: { x: 0, y: 0, w: 10, h: 10 }, strictness: 'perceptual' }, 0.03);
+  const iconLayout = resolveRegionThreshold({ regionId: 'icon', nodeId: 'i1', kind: 'image', name: 'Search Icon', box: { x: 0, y: 0, w: 10, h: 10 }, strictness: 'layout' }, 0.5);
+  assert.equal(textStrict < imagePerceptual, true);
+  assert.equal(imagePerceptual, 0.03);
+  assert.equal(iconLayout, 0.02);
 });
