@@ -92,6 +92,7 @@ test('plugin UI uses stack-safe asset base64 conversion and keeps asset upload f
 test('plugin code scans text descendants without recursion', () => {
   const source = fs.readFileSync(path.resolve('plugin/code.js'), 'utf8');
   assert.doesNotMatch(source, /hasTextDescendant\(child\)/);
+  assert.doesNotMatch(source, /\{[^\n}]*\.\.\./);
   assert.match(source, /function scanTextDescendant\(node\)/);
   assert.match(source, /new WeakSet\(\)/);
 });

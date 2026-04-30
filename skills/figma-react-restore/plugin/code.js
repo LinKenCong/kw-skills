@@ -632,11 +632,11 @@ function collectAssetNodes(rootNode) {
 }
 
 function walkFigma(rootNode, fn, options) {
-  return walkFigmaTree(rootNode, fn, { maxDepth: 6, maxChildren: 240, ...(options || {}) });
+  return walkFigmaTree(rootNode, fn, mergeOptions({ maxDepth: 6, maxChildren: 240 }, options));
 }
 
 function walkFigmaDeep(rootNode, fn, options) {
-  return walkFigmaTree(rootNode, fn, { maxDepth: FIGMA_DEEP_TRAVERSAL_MAX_DEPTH, ...(options || {}) });
+  return walkFigmaTree(rootNode, fn, mergeOptions({ maxDepth: FIGMA_DEEP_TRAVERSAL_MAX_DEPTH }, options));
 }
 
 function walkFigmaTree(rootNode, fn, options) {
@@ -686,6 +686,19 @@ function walkFigmaTree(rootNode, fn, options) {
   const summary = { visitedCount, truncated, stopped: false, reason };
   if (truncated && typeof settings.onLimit === 'function') settings.onLimit(summary);
   return summary;
+}
+
+function mergeOptions(defaults, options) {
+  const merged = {};
+  for (const key in defaults) {
+    if (Object.prototype.hasOwnProperty.call(defaults, key)) merged[key] = defaults[key];
+  }
+  if (options) {
+    for (const key in options) {
+      if (Object.prototype.hasOwnProperty.call(options, key)) merged[key] = options[key];
+    }
+  }
+  return merged;
 }
 
 function toBox(box) {
