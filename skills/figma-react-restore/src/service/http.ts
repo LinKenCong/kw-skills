@@ -4,6 +4,7 @@ import { Hono, type Context } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { createId } from '../ids.js';
 import {
+  ARTIFACT_UPLOAD_BASE64_MAX_LENGTH,
   artifactUploadSchema,
   jobCreateSchema,
   jobProgressSchema,
@@ -173,7 +174,23 @@ export function createRuntimeApp(state: RuntimeState): Hono {
         recoverable: false,
       });
     }
-    const payload = artifactUploadSchema.parse(await parseJson(c));
+    const rawPayload = await parseJson(c);
+    if (rawPayload && typeof rawPayload === 'object' && 'dataBase64' in rawPayload) {
+      const dataBase64 = (rawPayload as Record<string, unknown>).dataBase64;
+      if (typeof dataBase64 === 'string' && dataBase64.length > ARTIFACT_UPLOAD_BASE64_MAX_LENGTH) {
+        throw new ServiceHttpError(
+          'UPLOAD_BASE64_TOO_LARGE',
+          `Artifact base64 payload exceeds ${ARTIFACT_UPLOAD_BASE64_MAX_LENGTH} characters`,
+          {
+            httpStatus: 413,
+            recoverable: false,
+            hint: 'Reduce artifact size or selection scope before retrying extraction.',
+            details: { maxBase64Length: ARTIFACT_UPLOAD_BASE64_MAX_LENGTH },
+          }
+        );
+      }
+    }
+    const payload = artifactUploadSchema.parse(rawPayload);
     if (!payload.mediaType) {
       throw new ServiceHttpError('MEDIA_TYPE_REQUIRED', 'Artifact mediaType is required', {
         httpStatus: 400,
@@ -192,8 +209,9 @@ export function createRuntimeApp(state: RuntimeState): Hono {
     if (buffer.length > MAX_ARTIFACT_BYTES) {
       throw new ServiceHttpError('ARTIFACT_TOO_LARGE', `Artifact exceeds ${MAX_ARTIFACT_BYTES} bytes`, {
         httpStatus: 413,
-        recoverable: true,
-        hint: 'Upload a smaller artifact or split the payload.',
+        recoverable: false,
+        hint: 'Reduce artifact size or selection scope before retrying extraction.',
+        details: { maxArtifactBytes: MAX_ARTIFACT_BYTES },
       });
     }
     assertMediaTypeMatches(payload.mediaType, buffer);

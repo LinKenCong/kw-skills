@@ -18,10 +18,14 @@
   <div id="status" class="status"><strong>Starting</strong></div>
   <div class="status">Keep this plugin window open. It registers automatically and listens for extraction jobs.</div>
   <pre id="log"></pre>
+<script src="protocol.js"></script>
+<script src="shared.js"></script>
 <script>
-const SERVICE_URL = 'http://127.0.0.1:49327';
-const HEARTBEAT_MS = 5000;
-const POLL_MS = 1000;
+const protocol = window.FrrProtocol;
+const shared = window.FrrPluginShared;
+const SERVICE_URL = protocol.SERVICE_URL;
+const HEARTBEAT_MS = protocol.HEARTBEAT_MS;
+const POLL_MS = protocol.POLL_MS;
 
 function storageGet(key) {
   try {
@@ -49,7 +53,7 @@ const state = {
   reconnectDelayMs: 1000,
   connecting: false,
   registered: false,
-  handledJobs: {},
+  jobTracker: shared.createJobTracker(),
   jobSecrets: {},
 };
 storageSet('frr.sessionId', state.pluginSessionId);
@@ -79,14 +83,18 @@ window.onmessage = async function (event) {
     return;
   }
   if (message.type === 'extract-error') {
+    state.jobTracker.mark(message.jobId, protocol.JOB_STATUS.failed, { error: message.error });
     await postJobJson(message.jobId, `/jobs/${message.jobId}/result`, { ok: false, error: message.error }).catch(showError);
     log(`Extraction failed: ${message.error.message}`);
     return;
   }
   if (message.type === 'extraction-ready') {
     try {
+      state.jobTracker.mark(message.jobId, protocol.JOB_STATUS.uploading);
       await finishExtraction(message);
+      state.jobTracker.mark(message.jobId, protocol.JOB_STATUS.completed);
     } catch (error) {
+      state.jobTracker.mark(message.jobId, protocol.JOB_STATUS.failed, { error: normalizeErrorPayload(error) });
       await failExtraction(message.jobId, error).catch(showError);
       showError(error);
     }
@@ -119,6 +127,7 @@ async function connectRuntime(reason) {
       await sleep(150);
     }
     await registerSession(false);
+    await reconcileOrphanedJobs();
     state.reconnectDelayMs = 1000;
     startHeartbeat();
     connectEvents();
@@ -168,7 +177,9 @@ function connectEvents() {
     handleJob(data.job, 'received');
   });
   state.events.addEventListener('job.canceled', function (event) {
-    log(`Job canceled: ${event.data}`);
+    const data = JSON.parse(event.data);
+    state.jobTracker.mark(data.job.jobId, protocol.JOB_STATUS.canceled);
+    log(`Job canceled: ${data.job.jobId}`);
   });
   state.events.onerror = function () {
     log(`Event stream unavailable; readyState=${state.events ? state.events.readyState : 'closed'}; using polling fallback`);
@@ -184,6 +195,7 @@ function startHeartbeat() {
   state.heartbeatTimer = setInterval(function () {
     registerSession(true).catch(function (error) {
       log(`Runtime heartbeat failed: ${error.message || String(error)}`);
+      markInFlightJobsOrphaned();
       resetConnection();
       handleConnectionError(error);
     });
@@ -214,86 +226,186 @@ function stopHeartbeat() {
 async function pollJobs() {
   const data = await getJson(`/jobs?sessionId=${encodeURIComponent(state.pluginSessionId)}&status=pending`);
   const jobs = data.jobs || [];
-  for (const job of jobs) {
-    handleJob(job, 'polled');
-  }
+  for (const job of jobs) handleJob(job, 'polled');
 }
 
 function handleJob(job, source) {
-  if (!job || state.handledJobs[job.jobId]) return;
+  if (!job || !job.jobId) return;
+  const entry = state.jobTracker.upsert(job, source);
   if (job.jobSecret) state.jobSecrets[job.jobId] = job.jobSecret;
-  state.handledJobs[job.jobId] = true;
+  if (!state.jobTracker.canStart(job.jobId)) return;
+  if (entry.capability !== 'extract.selection') return;
+  state.jobTracker.mark(job.jobId, protocol.JOB_STATUS.extracting);
   log(`Job ${source}: ${job.jobId} ${job.capability}`);
-  if (job.capability === 'extract.selection') {
-    parent.postMessage({ pluginMessage: { type: 'extract-selection', job } }, '*');
-  }
+  parent.postMessage({ pluginMessage: { type: 'extract-selection', job } }, '*');
 }
 
 async function finishExtraction(message) {
-  for (const artifact of message.artifacts) {
+  for (let i = 0; i < message.artifacts.length; i += 1) {
+    const artifact = message.artifacts[i];
     const dataBase64 = bytesToBase64(artifact.bytes);
-    await postJobJson(message.jobId, `/jobs/${message.jobId}/artifacts`, {
+    await uploadArtifactWithRetry(message.jobId, {
       artifactId: artifact.artifactId,
       kind: artifact.kind,
       fileName: artifact.fileName,
       mediaType: artifact.mediaType,
       sourceNodeId: artifact.sourceNodeId,
       dataBase64,
-    });
-    log(`Uploaded artifact ${artifact.artifactId}`);
+    }, i + 1, message.artifacts.length);
   }
+  state.jobTracker.mark(message.jobId, protocol.JOB_STATUS.reporting);
   await postJobJson(message.jobId, `/jobs/${message.jobId}/result`, { ok: true, result: message.extraction });
   log(`Extraction completed for job ${message.jobId}`);
 }
 
+async function uploadArtifactWithRetry(jobId, payload, index, total) {
+  let attempt = 0;
+  let lastError;
+  while (attempt < protocol.UPLOAD_MAX_ATTEMPTS) {
+    attempt += 1;
+    state.jobTracker.markAttempt(jobId, payload.artifactId, attempt);
+    try {
+      await postJobJson(jobId, `/jobs/${jobId}/artifacts`, payload);
+      log(`Uploaded artifact ${payload.artifactId} (${index}/${total}) attempt=${attempt}`);
+      return;
+    } catch (error) {
+      lastError = error;
+      const normalized = shared.normalizeServiceError({ error: normalizeErrorPayload(error) }, error.httpStatus || 500);
+      if (!shared.shouldRetryServiceError(normalized) || attempt >= protocol.UPLOAD_MAX_ATTEMPTS) break;
+      const delay = shared.computeBackoffDelay(attempt, protocol.UPLOAD_RETRY_BASE_DELAY_MS, protocol.UPLOAD_RETRY_MAX_DELAY_MS);
+      log(`Retry artifact ${payload.artifactId} (${attempt}/${protocol.UPLOAD_MAX_ATTEMPTS}) in ${delay}ms: ${normalized.code}`);
+      await sleep(delay);
+    }
+  }
+  throw lastError;
+}
+
 async function failExtraction(jobId, error) {
   if (!jobId) return;
-  const message = error && error.message ? error.message : String(error);
+  const normalized = normalizeErrorPayload(error);
   await postJobJson(jobId, `/jobs/${jobId}/result`, {
     ok: false,
     error: {
-      code: 'ARTIFACT_UPLOAD_FAILED',
-      message,
-      recoverable: true,
-      hint: 'Retry extraction with a smaller selection or fewer/lighter assets.',
+      code: normalized.code,
+      message: normalized.message,
+      recoverable: normalized.recoverable,
+      hint: normalized.hint,
+      httpStatus: normalized.httpStatus,
     },
   });
-  log(`Extraction marked failed for job ${jobId}: ${message}`);
+  log(`Extraction marked failed for job ${jobId}: ${normalized.code}`);
+}
+
+function normalizeErrorPayload(error) {
+  if (!error) {
+    return { code: 'UNKNOWN_PLUGIN_ERROR', message: 'Unknown plugin error', recoverable: true, hint: 'Retry extraction.' };
+  }
+  if (error instanceof shared.ServiceRequestError) {
+    return {
+      code: error.code,
+      message: error.message,
+      recoverable: error.code === 'ARTIFACT_TOO_LARGE' || error.code === 'UPLOAD_BASE64_TOO_LARGE' ? false : (error.recoverable !== false),
+      hint: error.hint || (error.retryable ? 'The runtime request is retryable; retry extraction after runtime recovers.' : 'Retry extraction or reduce selection scope.'),
+      httpStatus: error.httpStatus,
+    };
+  }
+  const message = error.message || String(error);
+  return {
+    code: 'ARTIFACT_UPLOAD_FAILED',
+    message,
+    recoverable: true,
+    hint: 'Retry extraction with a smaller selection or fewer/lighter assets.',
+  };
 }
 
 async function postJson(endpoint, body) {
-  const response = await fetch(`${SERVICE_URL}${endpoint}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  const data = await response.json();
-  if (!response.ok || data.ok === false) throw new Error(data.error ? data.error.message : `HTTP ${response.status}`);
+  let response;
+  try {
+    response = await fetch(`${SERVICE_URL}${endpoint}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch (error) {
+    throw new shared.ServiceRequestError(error.message || String(error), {
+      code: 'NETWORK_ERROR',
+      httpStatus: 503,
+      recoverable: true,
+      hint: 'Ensure figma-react-restore service is running.',
+      retryable: true,
+    });
+  }
+  const data = await parseResponseJson(response);
+  if (!response.ok || data.ok === false) throw shared.normalizeServiceError(data, response.status);
   return data;
 }
 
 async function postJobJson(jobId, endpoint, body) {
   const jobSecret = state.jobSecrets[jobId];
-  if (!jobSecret) throw new Error(`Missing job secret for ${jobId}`);
-  const response = await fetch(`${SERVICE_URL}${endpoint}`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'x-frr-plugin-session-id': state.pluginSessionId,
-      'x-frr-job-secret': jobSecret,
-    },
-    body: JSON.stringify(body),
-  });
-  const data = await response.json();
-  if (!response.ok || data.ok === false) throw new Error(data.error ? data.error.message : `HTTP ${response.status}`);
+  if (!jobSecret) {
+    throw new shared.ServiceRequestError(`Missing job secret for ${jobId}`, {
+      code: 'JOB_SECRET_MISSING',
+      httpStatus: 401,
+      recoverable: true,
+      hint: 'Wait for job polling to return a valid jobSecret.',
+      retryable: true,
+    });
+  }
+  let response;
+  try {
+    response = await fetch(`${SERVICE_URL}${endpoint}`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-frr-plugin-session-id': state.pluginSessionId,
+        'x-frr-job-secret': jobSecret,
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (error) {
+    throw new shared.ServiceRequestError(error.message || String(error), {
+      code: 'NETWORK_ERROR',
+      httpStatus: 503,
+      recoverable: true,
+      hint: 'Ensure figma-react-restore service is reachable.',
+      retryable: true,
+    });
+  }
+  const data = await parseResponseJson(response);
+  if (!response.ok || data.ok === false) throw shared.normalizeServiceError(data, response.status);
   return data;
 }
 
 async function getJson(endpoint) {
-  const response = await fetch(`${SERVICE_URL}${endpoint}`, { method: 'GET' });
-  const data = await response.json();
-  if (!response.ok || data.ok === false) throw new Error(data.error ? data.error.message : `HTTP ${response.status}`);
+  let response;
+  try {
+    response = await fetch(`${SERVICE_URL}${endpoint}`, { method: 'GET' });
+  } catch (error) {
+    throw new shared.ServiceRequestError(error.message || String(error), {
+      code: 'NETWORK_ERROR',
+      httpStatus: 503,
+      recoverable: true,
+      hint: 'Ensure figma-react-restore service is reachable.',
+      retryable: true,
+    });
+  }
+  const data = await parseResponseJson(response);
+  if (!response.ok || data.ok === false) throw shared.normalizeServiceError(data, response.status);
   return data;
+}
+
+async function parseResponseJson(response) {
+  try {
+    return await response.json();
+  } catch (error) {
+    throw new shared.ServiceRequestError(error.message || String(error), {
+      code: 'INVALID_JSON',
+      httpStatus: response.status || 500,
+      recoverable: true,
+      hint: 'Runtime response is not valid JSON.',
+      retryable: true,
+    });
+  }
 }
 
 function resetConnection() {
@@ -304,7 +416,38 @@ function resetConnection() {
   stopHeartbeat();
 }
 
+function markInFlightJobsOrphaned() {
+  for (const job of state.jobTracker.values()) {
+    if (!job) continue;
+    if ([protocol.JOB_STATUS.extracting, protocol.JOB_STATUS.uploading, protocol.JOB_STATUS.reporting].includes(job.status)) {
+      state.jobTracker.mark(job.jobId, protocol.JOB_STATUS.orphaned, { error: { code: 'PLUGIN_CONNECTION_LOST', message: 'Plugin disconnected while processing job', recoverable: true } });
+    }
+  }
+}
+
+async function reconcileOrphanedJobs() {
+  const orphaned = state.jobTracker.values().filter((job) => job.status === protocol.JOB_STATUS.orphaned);
+  for (const job of orphaned) {
+    try {
+      await postJobJson(job.jobId, `/jobs/${job.jobId}/result`, {
+        ok: false,
+        error: {
+          code: 'PLUGIN_CONNECTION_LOST',
+          message: 'Plugin connection reset while processing extraction job.',
+          recoverable: true,
+          hint: 'Retry extraction from CLI after plugin reconnects.',
+        },
+      });
+      state.jobTracker.mark(job.jobId, protocol.JOB_STATUS.failed);
+      log(`Reconciled orphaned job ${job.jobId} as recoverable failure`);
+    } catch (error) {
+      log(`Skip orphaned job reconcile ${job.jobId}: ${error.message || String(error)}`);
+    }
+  }
+}
+
 function handleConnectionError(error) {
+  markInFlightJobsOrphaned();
   resetConnection();
   const message = error.message || String(error);
   setStatus(`Waiting for runtime at ${SERVICE_URL}`);

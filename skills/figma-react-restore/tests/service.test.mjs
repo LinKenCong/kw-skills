@@ -347,3 +347,47 @@ test('service attaches primary and fallback asset paths', async () => {
   assert.match(extraction.assets[0].path, /icon\.svg$/);
   assert.match(extraction.assets[0].fallbackPath, /icon\.png$/);
 });
+
+test('service rejects oversized base64 payloads with structured error', async () => {
+  const { app } = makeApp();
+  await register(app);
+  await createJob(app);
+  const job = await pollPendingJob(app);
+
+  const hugeBase64 = 'A'.repeat((32 * 1024 * 1024) + 4);
+  const response = await app.request(`/jobs/${job.jobId}/artifacts`, {
+    method: 'POST',
+    headers: jobHeaders(job),
+    body: JSON.stringify({ artifactId: 'oversized', kind: 'asset', fileName: 'oversized.png', mediaType: 'image/png', dataBase64: hugeBase64 }),
+  });
+  assert.equal(response.status, 413);
+  const data = await json(response);
+  assert.equal(data.error.code, 'UPLOAD_BASE64_TOO_LARGE');
+  assert.equal(data.error.recoverable, false);
+});
+
+test('service rejects artifact path traversal and keeps job active', async () => {
+  const { app } = makeApp();
+  await register(app);
+  await createJob(app);
+  const job = await pollPendingJob(app);
+
+  const response = await app.request(`/jobs/${job.jobId}/artifacts`, {
+    method: 'POST',
+    headers: jobHeaders(job),
+    body: JSON.stringify({
+      artifactId: 'badpath',
+      kind: 'asset',
+      fileName: 'x.txt',
+      path: '../escape.txt',
+      mediaType: 'text/plain',
+      dataBase64: Buffer.from('hello').toString('base64'),
+    }),
+  });
+  assert.equal(response.status, 422);
+  const data = await json(response);
+  assert.equal(data.error.code, 'SCHEMA_VALIDATION_FAILED');
+
+  const current = await json(await app.request(`/jobs/${job.jobId}`, { headers: { 'x-frr-admin-token': ADMIN_TOKEN } }));
+  assert.equal(current.job.status, 'pending');
+});

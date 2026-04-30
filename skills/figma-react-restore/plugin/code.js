@@ -1,5 +1,43 @@
 figma.showUI(__html__, { width: 380, height: 560, themeColors: true });
 
+const SERIALIZE_NODE_KEYS = [
+  'fills',
+  'strokes',
+  'strokeWeight',
+  'strokeAlign',
+  'effects',
+  'cornerRadius',
+  'topLeftRadius',
+  'topRightRadius',
+  'bottomRightRadius',
+  'bottomLeftRadius',
+  'opacity',
+  'blendMode',
+  'constraints',
+  'clipsContent',
+  'rotation',
+  'relativeTransform',
+  'layoutMode',
+  'layoutWrap',
+  'itemSpacing',
+  'counterAxisSpacing',
+  'primaryAxisSizingMode',
+  'counterAxisSizingMode',
+  'primaryAxisAlignItems',
+  'counterAxisAlignItems',
+  'layoutSizingHorizontal',
+  'layoutSizingVertical',
+  'layoutAlign',
+  'layoutGrow',
+  'layoutPositioning',
+  'paddingLeft',
+  'paddingRight',
+  'paddingTop',
+  'paddingBottom',
+];
+const ASSET_NAME_PATTERN = /\b(icon|logo|avatar|photo|image|img|illustration|asset|decorative|decoration|divider|border|separator|ornament|pattern)\b/i;
+const DECORATIVE_NAME_PATTERN = /\b(decorative|decoration|divider|border|separator|ornament|pattern)\b/i;
+
 figma.ui.onmessage = async (message) => {
   try {
     if (message.type === 'get-session') {
@@ -128,41 +166,7 @@ function serializeNode(node, depth, childIndex, parentNodeId) {
   };
   const box = toBox(node.absoluteBoundingBox);
   if (box) result.absoluteBoundingBox = box;
-  for (const key of [
-    'fills',
-    'strokes',
-    'strokeWeight',
-    'strokeAlign',
-    'effects',
-    'cornerRadius',
-    'topLeftRadius',
-    'topRightRadius',
-    'bottomRightRadius',
-    'bottomLeftRadius',
-    'opacity',
-    'blendMode',
-    'constraints',
-    'clipsContent',
-    'rotation',
-    'relativeTransform',
-    'layoutMode',
-    'layoutWrap',
-    'itemSpacing',
-    'counterAxisSpacing',
-    'primaryAxisSizingMode',
-    'counterAxisSizingMode',
-    'primaryAxisAlignItems',
-    'counterAxisAlignItems',
-    'layoutSizingHorizontal',
-    'layoutSizingVertical',
-    'layoutAlign',
-    'layoutGrow',
-    'layoutPositioning',
-    'paddingLeft',
-    'paddingRight',
-    'paddingTop',
-    'paddingBottom',
-  ]) {
+  for (const key of SERIALIZE_NODE_KEYS) {
     if (key in node) result[key] = safeClone(node[key]);
   }
   if ('characters' in node) result.characters = node.characters;
@@ -610,7 +614,7 @@ function isVectorLike(node) {
 }
 
 function isNamedAsset(node) {
-  return /\b(icon|logo|avatar|photo|image|img|illustration|asset|decorative|decoration|divider|border|separator|ornament|pattern)\b/i.test(node.name || '');
+  return ASSET_NAME_PATTERN.test(node.name || '');
 }
 
 function assetCandidateReason(node) {
@@ -671,7 +675,7 @@ function assetUsePolicy(node, rootNode) {
 
 function isThinDecorativeAsset(node, box, rootBox) {
   if (!rootBox) return false;
-  if (!/\b(decorative|decoration|divider|border|separator|ornament|pattern)\b/i.test(node.name || '')) return false;
+  if (!DECORATIVE_NAME_PATTERN.test(node.name || '')) return false;
   const areaRatio = (box.w * box.h) / Math.max(1, rootBox.w * rootBox.h);
   const thin = box.h <= Math.max(72, rootBox.h * 0.025) || box.w <= Math.max(72, rootBox.w * 0.025);
   return thin && areaRatio <= 0.06;
