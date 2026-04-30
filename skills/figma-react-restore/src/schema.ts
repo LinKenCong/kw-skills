@@ -346,6 +346,7 @@ export type Failure = z.infer<typeof failureSchema>;
 export const regionResultSchema = z.object({
   regionId: z.string(),
   nodeId: z.string().optional(),
+  threshold: z.number().min(0).max(1).optional(),
   diffRatio: z.number().min(0),
   diffPixels: z.number().int().nonnegative(),
   totalPixels: z.number().int().nonnegative(),

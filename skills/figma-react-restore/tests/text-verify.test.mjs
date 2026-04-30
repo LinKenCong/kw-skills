@@ -50,6 +50,40 @@ test('text verifier requires exact normalized Figma copy', () => {
   assert.equal(results.find((result) => result.nodeId === 't3').status, 'passed');
 });
 
+test('text verifier supports one Figma text node mapped to multiple inline DOM nodes', () => {
+  const spec = {
+    ...baseSpec,
+    texts: [{ nodeId: 'hero-title', text: 'Train Hard. Live Better' }],
+  };
+  const results = buildTextResults(spec, [
+    {
+      nodeId: 'hero-title',
+      selector: '[data-figma-node="hero-title"] span:nth-child(1)',
+      box: { x: 0, y: 0, w: 10, h: 10 },
+      computed: {},
+      textContent: 'Train Hard.',
+      innerText: 'Train Hard.',
+      ariaLabel: '',
+      alt: '',
+      value: '',
+    },
+    {
+      nodeId: 'hero-title',
+      selector: '[data-figma-node="hero-title"] span:nth-child(2)',
+      box: { x: 11, y: 0, w: 10, h: 10 },
+      computed: {},
+      textContent: 'Live Better',
+      innerText: 'Live Better',
+      ariaLabel: '',
+      alt: '',
+      value: '',
+    },
+  ], 'Train Hard. Live Better');
+  assert.equal(results.length, 1);
+  assert.equal(results[0].status, 'passed');
+  assert.equal(results[0].normalizedActual, 'Train Hard. Live Better');
+});
+
 test('text region pixel diff is tolerated when exact text and computed styles pass', () => {
   const warnings = [];
   const failures = buildRegionFailures({

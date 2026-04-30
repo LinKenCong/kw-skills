@@ -116,7 +116,7 @@ export async function runVerification(options: VerifyOptions): Promise<{ report:
   const failures: Failure[] = [];
   const warnings: Warning[] = [];
   for (const region of spec.regions.filter((item) => item.strictness !== 'ignored')) {
-    const result = await compareRegion(region, expectedPath, actualPath, outputDir, artifactRoot, spec.thresholds.regionMaxDiffRatio);
+    const result = await compareRegion(region, expectedPath, actualPath, outputDir, artifactRoot, resolveRegionThreshold(region, spec.thresholds.regionMaxDiffRatio));
     regionResults.push(result);
   }
 
@@ -491,6 +491,7 @@ async function compareRegion(region: Region, expectedPath: string, actualPath: s
     return {
       regionId: region.regionId,
       ...(region.nodeId ? { nodeId: region.nodeId } : {}),
+      threshold,
       diffRatio: 1,
       diffPixels: 0,
       totalPixels: 0,
@@ -501,6 +502,7 @@ async function compareRegion(region: Region, expectedPath: string, actualPath: s
   return {
     regionId: region.regionId,
     ...(region.nodeId ? { nodeId: region.nodeId } : {}),
+    threshold,
     diffRatio: compare.diffRatio,
     diffPixels: compare.diffPixels,
     totalPixels: compare.totalPixels,
@@ -512,17 +514,59 @@ async function compareRegion(region: Region, expectedPath: string, actualPath: s
 }
 
 function buildRegionFailure(region: Region, result: RegionResult): Failure {
+  const threshold = result.threshold ?? 0;
   return {
     failureId: createId('failure'),
     category: region.kind === 'text' ? 'typography' : region.kind === 'image' ? 'asset-crop' : 'layout-spacing',
     severity: result.diffRatio > 0.2 ? 'high' : 'medium',
-    message: `Region ${region.name || region.regionId} diff ratio ${formatRatio(result.diffRatio)} exceeds threshold`,
+    message: `Region ${region.name || region.regionId} diff ratio ${formatRatio(result.diffRatio)} exceeds threshold ${formatRatio(threshold)}`,
     regionId: region.regionId,
     ...(region.nodeId ? { nodeId: region.nodeId } : {}),
     ...(result.diffPath ? { evidencePath: result.diffPath } : {}),
     expected: { box: region.box },
-    actual: { diffRatio: result.diffRatio, diffPixels: result.diffPixels },
+    actual: { diffRatio: result.diffRatio, threshold, diffPixels: result.diffPixels },
   };
+}
+
+export function resolveRegionThreshold(region: Region, defaultThreshold: number): number {
+  const candidate = regionThresholdCandidate(region);
+  return clampNumber(Math.min(defaultThreshold, candidate), 0, 1);
+}
+
+function regionThresholdCandidate(region: Region): number {
+  const role = classifyRegionRole(region);
+  if (region.strictness === 'strict') {
+    if (role === 'text') return 0.006;
+    if (role === 'icon') return 0.012;
+    if (role === 'image') return 0.02;
+    if (role === 'background') return 0.03;
+    return 0.014;
+  }
+  if (region.strictness === 'layout') {
+    if (role === 'text') return 0.012;
+    if (role === 'icon') return 0.02;
+    if (role === 'image') return 0.035;
+    if (role === 'background') return 0.05;
+    return 0.025;
+  }
+  if (role === 'text') return 0.02;
+  if (role === 'icon') return 0.04;
+  if (role === 'image') return 0.07;
+  if (role === 'background') return 0.09;
+  return 0.05;
+}
+
+function classifyRegionRole(region: Region): 'text' | 'icon' | 'image' | 'background' | 'generic' {
+  const label = `${region.name || ''} ${region.regionId}`.toLowerCase();
+  if (region.kind === 'text') return 'text';
+  if (region.kind === 'image') {
+    if (/\b(icon|glyph|avatar)\b/.test(label)) return 'icon';
+    if (/\b(bg|background|hero|banner)\b/.test(label)) return 'background';
+    return 'image';
+  }
+  if (/\b(icon|glyph)\b/.test(label)) return 'icon';
+  if (/\b(bg|background)\b/.test(label)) return 'background';
+  return 'generic';
 }
 
 export function buildRegionFailures(options: {
@@ -641,7 +685,7 @@ function mappingForRegion(region: Region): DomMapping {
 }
 
 export function buildTextResults(spec: FidelitySpec, nodes: CapturedDomNode[], visibleText: string): TextResult[] {
-  const byNode = new Map(nodes.map((node) => [node.nodeId, node]));
+  const byNode = groupNodesById(nodes);
   const mappingByNode = new Map(spec.regions.filter((region) => region.nodeId).map((region) => [region.nodeId!, mappingForRegion(region)]));
   const pageText = normalizeText(visibleText);
   const results: TextResult[] = [];
@@ -661,8 +705,8 @@ export function buildTextResults(spec: FidelitySpec, nodes: CapturedDomNode[], v
       });
       continue;
     }
-    const node = text.nodeId ? byNode.get(text.nodeId) : undefined;
-    if (!node) {
+    const grouped = text.nodeId ? byNode.get(text.nodeId) : undefined;
+    if (!grouped || grouped.length === 0) {
       const existsElsewhere = pageText.includes(expected);
       if (existsElsewhere && mapping === 'optional') {
         results.push({
@@ -689,11 +733,11 @@ export function buildTextResults(spec: FidelitySpec, nodes: CapturedDomNode[], v
       });
       continue;
     }
-    const actual = bestNodeText(node);
+    const actual = bestTextForNodes(grouped);
     const normalizedActual = normalizeText(actual);
     results.push({
       ...(text.nodeId ? { nodeId: text.nodeId } : {}),
-      selector: node.selector,
+      selector: grouped[0]!.selector,
       status: normalizedActual === expected ? 'passed' : 'failed',
       expectedText: text.text,
       actualText: actual,
@@ -961,6 +1005,24 @@ function bestNodeText(node: CapturedDomNode): string {
   return node.innerText || node.textContent || node.ariaLabel || node.alt || node.value || '';
 }
 
+function groupNodesById(nodes: CapturedDomNode[]): Map<string, CapturedDomNode[]> {
+  const byNode = new Map<string, CapturedDomNode[]>();
+  for (const node of nodes) {
+    if (!node.nodeId) continue;
+    const list = byNode.get(node.nodeId) || [];
+    list.push(node);
+    byNode.set(node.nodeId, list);
+  }
+  return byNode;
+}
+
+function bestTextForNodes(nodes: CapturedDomNode[]): string {
+  if (nodes.length === 1) return bestNodeText(nodes[0]!);
+  const joined = normalizeText(nodes.map((node) => bestNodeText(node)).filter(Boolean).join(' '));
+  if (joined) return joined;
+  return bestNodeText(nodes[0]!);
+}
+
 function normalizeText(value: string): string {
   return value.replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
 }
@@ -977,6 +1039,10 @@ function normalizeWeight(value: string | number): number {
   if (lower === 'bold') return 700;
   const parsed = Number.parseInt(lower, 10);
   return Number.isFinite(parsed) ? parsed : 400;
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
 }
 
 function sameColor(expected: string, actual: string): boolean {

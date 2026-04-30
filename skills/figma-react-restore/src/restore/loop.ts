@@ -22,6 +22,7 @@ export type RestoreOptions = {
   waitMs?: number;
   responsiveSmoke?: boolean;
   responsiveViewports?: ResponsiveViewportSpec[];
+  archiveFinalArtifacts?: boolean;
 };
 
 export type RestoreResult = {
@@ -58,7 +59,7 @@ export async function runRestoreAttempt(options: RestoreOptions, store = new Art
     const blockedReason = `blocked-max-iterations: restore already reached ${maxIterations} attempts`;
     const blocked = restoreAttemptSchema.parse({ ...attempt, completedAt: nowIso(), status: 'blocked' });
     writeJsonFile(path.join(attemptDir, 'attempt.json'), blocked);
-    writeFinalReport(store, options.runId, { status: 'blocked', attempt: blocked, blockedReason });
+    writeFinalReport(store, options.runId, { status: 'blocked', attempt: blocked, blockedReason }, options.archiveFinalArtifacts !== false);
     return { status: 'blocked', attempt: blocked, blockedReason };
   }
 
@@ -113,7 +114,7 @@ export async function runRestoreAttempt(options: RestoreOptions, store = new Art
       createAgentBriefFromFiles({ reportPath, planPath, outputPath: briefPath });
       createImplementationBriefFromFiles({ reportPath, agentBriefPath: briefPath, outputPath: implementationBriefPath, projectRoot: options.projectRoot });
       const result = { status: 'blocked' as const, attempt: completed, reportPath, repairPlanPath: planPath, agentBriefPath: briefPath, implementationBriefPath, blockedReason };
-      writeFinalReport(store, options.runId, result);
+      writeFinalReport(store, options.runId, result, options.archiveFinalArtifacts !== false);
       return result;
     }
     if (report.status !== 'passed' && completed.index >= maxIterations) {
@@ -125,21 +126,21 @@ export async function runRestoreAttempt(options: RestoreOptions, store = new Art
       const blockedAttempt = restoreAttemptSchema.parse({ ...completed, status: 'blocked' });
       writeJsonFile(path.join(attemptDir, 'attempt.json'), blockedAttempt);
       const result = { status: 'blocked' as const, attempt: blockedAttempt, reportPath, repairPlanPath: planPath, agentBriefPath: briefPath, implementationBriefPath, blockedReason };
-      writeFinalReport(store, options.runId, result);
+      writeFinalReport(store, options.runId, result, options.archiveFinalArtifacts !== false);
       return result;
     }
     if (report.status === 'passed') {
       const result = { status: 'passed' as const, attempt: completed, reportPath, repairPlanPath: planPath, agentBriefPath: briefPath, implementationBriefPath };
-      writeFinalReport(store, options.runId, result);
+      writeFinalReport(store, options.runId, result, options.archiveFinalArtifacts !== false);
       return result;
     }
     if (plan.status === 'blocked') {
       const result = { status: 'blocked' as const, attempt: completed, reportPath, repairPlanPath: planPath, agentBriefPath: briefPath, implementationBriefPath, ...(plan.blockedReason ? { blockedReason: plan.blockedReason } : {}) };
-      writeFinalReport(store, options.runId, result);
+      writeFinalReport(store, options.runId, result, options.archiveFinalArtifacts !== false);
       return result;
     }
     const result = { status: 'needs-agent-patch' as const, attempt: completed, reportPath, repairPlanPath: planPath, agentBriefPath: briefPath, implementationBriefPath };
-    writeFinalReport(store, options.runId, result);
+    writeFinalReport(store, options.runId, result, options.archiveFinalArtifacts !== false);
     return result;
   } catch (error) {
     const normalized = normalizeServiceError(error);
@@ -161,7 +162,7 @@ export async function runRestoreAttempt(options: RestoreOptions, store = new Art
       status: 'blocked',
       attempt: failed,
       blockedReason: `blocked-error: ${normalized.code}`,
-    });
+    }, options.archiveFinalArtifacts !== false);
     throw error;
   } finally {
     if (devProcess) {
@@ -264,8 +265,10 @@ function recordAttemptArtifacts(store: ArtifactStore, runId: string, report: Ver
   }
 }
 
-function writeFinalReport(store: ArtifactStore, runId: string, result: RestoreResult): void {
-  writeJsonFile(path.join(store.getRunDir(runId), 'final-report.json'), {
+function writeFinalReport(store: ArtifactStore, runId: string, result: RestoreResult, archiveFinalArtifacts: boolean): void {
+  const runDir = store.getRunDir(runId);
+  const finalReportPath = path.join(runDir, 'final-report.json');
+  writeJsonFile(finalReportPath, {
     schemaVersion: 1,
     runId,
     completedAt: nowIso(),
@@ -276,6 +279,36 @@ function writeFinalReport(store: ArtifactStore, runId: string, result: RestoreRe
     ...(result.agentBriefPath ? { agentBriefPath: relativeArtifactPath(store.artifactRoot, result.agentBriefPath) } : {}),
     ...(result.implementationBriefPath ? { implementationBriefPath: relativeArtifactPath(store.artifactRoot, result.implementationBriefPath) } : {}),
     ...(result.blockedReason ? { blockedReason: result.blockedReason } : {}),
+  });
+  if (archiveFinalArtifacts) writeFinalArchiveManifest(store, runId, result, finalReportPath);
+}
+
+function writeFinalArchiveManifest(store: ArtifactStore, runId: string, result: RestoreResult, finalReportPath: string): void {
+  const runDir = store.getRunDir(runId);
+  const archiveDir = path.join(runDir, 'restore', 'archive');
+  fs.mkdirSync(archiveDir, { recursive: true });
+  const timestamp = nowIso().replace(/[:.]/g, '-');
+  const archivePath = path.join(archiveDir, `${result.attempt.attemptId || timestamp}.manifest.json`);
+  const refs = [
+    { kind: 'final-report', path: relativeArtifactPath(store.artifactRoot, finalReportPath) },
+    ...(result.reportPath ? [{ kind: 'verify-report', path: relativeArtifactPath(store.artifactRoot, result.reportPath) }] : []),
+    ...(result.repairPlanPath ? [{ kind: 'repair-plan', path: relativeArtifactPath(store.artifactRoot, result.repairPlanPath) }] : []),
+    ...(result.agentBriefPath ? [{ kind: 'agent-brief', path: relativeArtifactPath(store.artifactRoot, result.agentBriefPath) }] : []),
+    ...(result.implementationBriefPath ? [{ kind: 'implementation-brief', path: relativeArtifactPath(store.artifactRoot, result.implementationBriefPath) }] : []),
+  ];
+  writeJsonFile(archivePath, {
+    schemaVersion: 1,
+    runId,
+    archivedAt: nowIso(),
+    status: result.status,
+    attemptId: result.attempt.attemptId,
+    refs,
+  });
+  writeJsonFile(path.join(archiveDir, 'latest.manifest.json'), {
+    schemaVersion: 1,
+    runId,
+    path: relativeArtifactPath(store.artifactRoot, archivePath),
+    updatedAt: nowIso(),
   });
 }
 
