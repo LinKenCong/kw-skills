@@ -70,8 +70,8 @@ Common `blockedReason` prefixes or failure categories:
 - `blocked-no-improvement`: report the best attempt and plateau reason instead of continuing blindly.
 - `blocked-max-iterations`: report the latest repair plan and stop unless the user explicitly raises the iteration cap.
 
-## Reference Design Docs
+## Maintenance Pointers
 
-- Design: `../../docs/figma-react-restore/design.md`
-- V1 implementation spec: `../../docs/figma-react-restore/v1-implementation-spec.md`
-- Figma plugin validation: `../../docs/figma-react-restore/figma-plugin-validation.md`
+- Historical docs pointer: `../../docs/figma-react-restore/README.md`
+- Long-lived workflow details: `references/`
+- Runtime/plugin implementation: `src/` and `plugin/`

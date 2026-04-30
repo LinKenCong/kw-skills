@@ -37,6 +37,10 @@ const SERIALIZE_NODE_KEYS = [
 ];
 const ASSET_NAME_PATTERN = /\b(icon|logo|avatar|photo|image|img|illustration|asset|decorative|decoration|divider|border|separator|ornament|pattern)\b/i;
 const DECORATIVE_NAME_PATTERN = /\b(decorative|decoration|divider|border|separator|ornament|pattern)\b/i;
+const FIGMA_TRAVERSAL_MAX_NODES = 20000;
+const FIGMA_DEEP_TRAVERSAL_MAX_DEPTH = 32;
+const TEXT_DESCENDANT_SCAN_MAX_NODES = 10000;
+const TEXT_DESCENDANT_SCAN_MAX_DEPTH = 64;
 
 figma.ui.onmessage = async (message) => {
   try {
@@ -56,6 +60,7 @@ figma.ui.onmessage = async (message) => {
         code: 'PLUGIN_EXCEPTION',
         message: error && error.message ? error.message : String(error),
         recoverable: true,
+        hint: pluginErrorHint(error),
       },
     });
   }
@@ -110,7 +115,8 @@ async function extractSelection(job) {
   const artifacts = [];
   const screenshots = [];
   const assets = [];
-  if (typeof rootNode.exportAsync === 'function') {
+  const jobOptions = job && job.options ? job.options : {};
+  if (jobOptions.screenshots !== false && typeof rootNode.exportAsync === 'function') {
     figma.ui.postMessage({ type: 'progress', jobId, progress: { stage: 'screenshot', message: 'Exporting PNG baseline', progress: 0.55 } });
     const bytes = await rootNode.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: 1 } });
     artifacts.push({
@@ -124,11 +130,27 @@ async function extractSelection(job) {
     const box = toBox(rootNode.absoluteBoundingBox);
     screenshots.push({ artifactId, nodeId: rootNode.id, width: box ? box.w : undefined, height: box ? box.h : undefined, mediaType: 'image/png' });
   }
-  figma.ui.postMessage({ type: 'progress', jobId, progress: { stage: 'assets', message: 'Exporting image and vector assets', progress: 0.72 } });
-  const assetResult = await exportAssets(rootNode);
-  artifacts.push(...assetResult.artifacts);
-  assets.push(...assetResult.assets);
-  warnings.push(...assetResult.warnings);
+  if (jobOptions.assets === false) {
+    warnings.push({
+      code: 'ASSET_EXPORT_DISABLED',
+      message: 'Asset export was disabled for this extraction run.',
+      hint: 'Use this run for layout/text restoration only, or rerun extraction without --no-assets before final asset verification.',
+    });
+  } else {
+    figma.ui.postMessage({ type: 'progress', jobId, progress: { stage: 'assets', message: 'Exporting image and vector assets', progress: 0.72 } });
+    try {
+      const assetResult = await exportAssets(rootNode);
+      artifacts.push(...assetResult.artifacts);
+      assets.push(...assetResult.assets);
+      warnings.push(...assetResult.warnings);
+    } catch (error) {
+      warnings.push({
+        code: 'ASSET_EXPORT_FAILED',
+        message: `Asset export failed and extraction continued without asset files: ${errorMessage(error)}`,
+        hint: pluginErrorHint(error) || 'Rerun extraction with --no-assets to force a layout/text-only run, or select a smaller Figma frame.',
+      });
+    }
+  }
   if (selection.length > 1) warnings.push({ code: 'MULTI_SELECTION', message: 'Multiple selected nodes were extracted under a common parent when available' });
 
   const extraction = stripUndefined({
@@ -400,12 +422,29 @@ async function exportAssets(rootNode) {
   const artifacts = [];
   const assets = [];
   const warnings = [];
-  const imageFillResult = await exportImageFillAssets(rootNode);
-  artifacts.push(...imageFillResult.artifacts);
-  assets.push(...imageFillResult.assets);
-  warnings.push(...imageFillResult.warnings);
-  const collected = collectAssetNodes(rootNode);
-  const candidateItems = prioritizeAssetCandidates(collected.candidates, rootNode).slice(0, 64);
+  try {
+    const imageFillResult = await exportImageFillAssets(rootNode);
+    artifacts.push(...imageFillResult.artifacts);
+    assets.push(...imageFillResult.assets);
+    warnings.push(...imageFillResult.warnings);
+  } catch (error) {
+    warnings.push({
+      code: 'IMAGE_FILL_ASSET_STAGE_FAILED',
+      message: `Image fill asset scan failed and extraction continued: ${errorMessage(error)}`,
+      hint: pluginErrorHint(error),
+    });
+  }
+  let collected = { candidates: [], warnings: [] };
+  try {
+    collected = collectAssetNodes(rootNode);
+  } catch (error) {
+    warnings.push({
+      code: 'ASSET_SCAN_FAILED',
+      message: `Asset candidate scan failed and extraction continued without node exports: ${errorMessage(error)}`,
+      hint: pluginErrorHint(error),
+    });
+  }
+  const candidateItems = prioritizeAssetCandidates(collected.candidates, rootNode, warnings).slice(0, 64);
   warnings.push(...collected.warnings);
   for (let index = 0; index < candidateItems.length; index += 1) {
     const item = candidateItems[index];
@@ -420,8 +459,8 @@ async function exportAssets(rootNode) {
         hint: policy.reason,
       });
     }
+    const baseId = `asset_${Date.now().toString(36)}_${index}`;
     try {
-      const baseId = `asset_${Date.now().toString(36)}_${index}`;
       if (vector) {
         const svgArtifactId = `${baseId}_svg`;
         const pngArtifactId = `${baseId}_png`;
@@ -478,8 +517,10 @@ async function exportAssets(rootNode) {
     } catch (error) {
       warnings.push({
         code: 'ASSET_EXPORT_FAILED',
-        message: `Failed to export asset ${node.name || node.id}: ${error && error.message ? error.message : String(error)}`,
+        message: `Failed to export asset ${node.name || node.id}: ${errorMessage(error)}`,
+        hint: pluginErrorHint(error),
       });
+      assets.push(missingNodeAssetEvidence(node, vector, policy, baseId));
     }
   }
   if (collected.candidates.length > candidateItems.length) {
@@ -500,6 +541,12 @@ async function exportImageFillAssets(rootNode) {
     if (!imagePaints.length) return true;
     for (const item of imagePaints) fills.push({ node, paint: item.paint, index: item.index });
     return true;
+  }, {
+    onLimit: (summary) => warnings.push({
+      code: 'IMAGE_FILL_SCAN_TRUNCATED',
+      message: `Image fill scan was truncated after ${summary.visitedCount} visited nodes (${summary.reason || 'limit'}).`,
+      hint: 'Some image fills may be missing. Select a smaller frame or rerun extraction on the affected section.',
+    }),
   });
   for (const item of fills.slice(0, 128)) {
     const hash = item.paint.imageHash;
@@ -509,6 +556,7 @@ async function exportImageFillAssets(rootNode) {
         const image = figma.getImageByHash(hash);
         if (!image) {
           warnings.push({ code: 'IMAGE_FILL_NOT_FOUND', message: `Image fill bytes not found for ${item.node.name || item.node.id}.` });
+          assets.push(missingImageFillAssetEvidence(item.node));
           continue;
         }
         const bytes = await image.getBytesAsync();
@@ -536,7 +584,15 @@ async function exportImageFillAssets(rootNode) {
         sourceKind: 'image-fill',
         mediaType: ref.mediaType,
       });
-      if (hasTextDescendant(item.node)) {
+      const textScan = scanTextDescendant(item.node);
+      if (textScan.truncated) {
+        warnings.push({
+          code: 'TEXT_DESCENDANT_SCAN_TRUNCATED',
+          message: `Text descendant scan was truncated for ${item.node.name || item.node.id}; treating the asset as if it may contain live text.`,
+          hint: 'Implement descendant text as live DOM/CSS and use the image fill only for the bitmap background.',
+        });
+      }
+      if (textScan.hasText || textScan.truncated) {
         warnings.push({
           code: 'IMAGE_FILL_EXTRACTED_WITH_LIVE_TEXT_OVERLAY',
           message: `Extracted image fill for ${item.node.name || item.node.id}; implement descendant text as live DOM, not as part of a raster export.`,
@@ -545,9 +601,10 @@ async function exportImageFillAssets(rootNode) {
     } catch (error) {
       warnings.push({
         code: 'IMAGE_FILL_EXPORT_FAILED',
-        message: `Failed to export image fill for ${item.node.name || item.node.id}: ${error && error.message ? error.message : String(error)}`,
+        message: `Failed to export image fill for ${item.node.name || item.node.id}: ${errorMessage(error)}`,
         hint: 'Retry extraction. If the image fill still cannot be extracted, finish non-image layout/text work and report the missing asset to the user.',
       });
+      assets.push(missingImageFillAssetEvidence(item.node));
     }
   }
   if (fills.length > 128) warnings.push({ code: 'IMAGE_FILL_EXPORT_LIMIT', message: `Exported first 128 image fills out of ${fills.length}.` });
@@ -564,34 +621,71 @@ function collectAssetNodes(rootNode) {
     const reason = assetCandidateReason(node);
     if (!reason) return;
     candidates.push(node);
+  }, {
+    onLimit: (summary) => warnings.push({
+      code: 'ASSET_SCAN_TRUNCATED',
+      message: `Asset candidate scan was truncated after ${summary.visitedCount} visited nodes (${summary.reason || 'limit'}).`,
+      hint: 'Some assets may be missing. Select a smaller frame or rerun extraction on the affected section.',
+    }),
   });
   return { candidates, warnings };
 }
 
-function walkFigma(rootNode, fn) {
-  const stack = [{ node: rootNode, depth: 0 }];
-  while (stack.length) {
-    const current = stack.shift();
-    if (!current || !current.node) continue;
-    fn(current.node, current.depth);
-    if ('children' in current.node && current.depth < 6) {
-      for (const child of current.node.children.slice(0, 240)) stack.push({ node: child, depth: current.depth + 1 });
-    }
-  }
+function walkFigma(rootNode, fn, options) {
+  return walkFigmaTree(rootNode, fn, { maxDepth: 6, maxChildren: 240, ...(options || {}) });
 }
 
-function walkFigmaDeep(rootNode, fn) {
+function walkFigmaDeep(rootNode, fn, options) {
+  return walkFigmaTree(rootNode, fn, { maxDepth: FIGMA_DEEP_TRAVERSAL_MAX_DEPTH, ...(options || {}) });
+}
+
+function walkFigmaTree(rootNode, fn, options) {
+  const settings = options || {};
+  const maxDepth = typeof settings.maxDepth === 'number' ? settings.maxDepth : FIGMA_DEEP_TRAVERSAL_MAX_DEPTH;
+  const maxNodes = typeof settings.maxNodes === 'number' ? settings.maxNodes : FIGMA_TRAVERSAL_MAX_NODES;
+  const maxChildren = typeof settings.maxChildren === 'number' ? settings.maxChildren : Infinity;
+  const visited = typeof WeakSet === 'function' ? new WeakSet() : null;
   const stack = [{ node: rootNode, depth: 0 }];
-  while (stack.length) {
-    const current = stack.shift();
+  let cursor = 0;
+  let visitedCount = 0;
+  let truncated = false;
+  let reason = '';
+  while (cursor < stack.length) {
+    if (visitedCount >= maxNodes) {
+      truncated = true;
+      reason = 'node-limit';
+      break;
+    }
+    const current = stack[cursor];
+    cursor += 1;
     if (!current || !current.node) continue;
+    if (visited && typeof current.node === 'object') {
+      if (visited.has(current.node)) continue;
+      visited.add(current.node);
+    }
+    visitedCount += 1;
     const result = fn(current.node, current.depth);
-    if (result === false) break;
+    if (result === false) return { visitedCount, truncated: false, stopped: true };
     if (result === 'skip-children') continue;
-    if ('children' in current.node && current.depth < 32) {
-      for (const child of current.node.children) stack.push({ node: child, depth: current.depth + 1 });
+    const children = 'children' in current.node && Array.isArray(current.node.children) ? current.node.children : [];
+    if (!children.length) continue;
+    if (current.depth >= maxDepth) {
+      truncated = true;
+      reason = reason || 'depth-limit';
+      continue;
+    }
+    const childCount = Math.min(children.length, maxChildren);
+    if (children.length > childCount) {
+      truncated = true;
+      reason = reason || 'children-limit';
+    }
+    for (let index = 0; index < childCount; index += 1) {
+      stack.push({ node: children[index], depth: current.depth + 1 });
     }
   }
+  const summary = { visitedCount, truncated, stopped: false, reason };
+  if (truncated && typeof settings.onLimit === 'function') settings.onLimit(summary);
+  return summary;
 }
 
 function toBox(box) {
@@ -624,11 +718,24 @@ function assetCandidateReason(node) {
   return '';
 }
 
-function prioritizeAssetCandidates(candidates, rootNode) {
+function prioritizeAssetCandidates(candidates, rootNode, warnings) {
   return candidates
     .map((node, index) => {
-      const policy = assetUsePolicy(node, rootNode);
-      return { node, policy, priority: assetCandidatePriority(node, policy, rootNode), index };
+      try {
+        const policy = assetUsePolicy(node, rootNode, warnings);
+        return { node, policy, priority: assetCandidatePriority(node, policy, rootNode), index };
+      } catch (error) {
+        warnings.push({
+          code: 'ASSET_POLICY_FAILED',
+          message: `Asset policy failed for ${node.name || node.id}; exported node will be treated as reference-only if available: ${errorMessage(error)}`,
+          hint: pluginErrorHint(error),
+        });
+        const policy = {
+          allowedUse: 'reference-only',
+          reason: 'Asset policy failed during extraction; do not use this export as implementation content without manual review.',
+        };
+        return { node, policy, priority: 100, index };
+      }
     })
     .sort((a, b) => a.priority - b.priority || a.index - b.index);
 }
@@ -645,11 +752,19 @@ function assetCandidatePriority(node, policy, rootNode) {
   return 10;
 }
 
-function assetUsePolicy(node, rootNode) {
+function assetUsePolicy(node, rootNode, warnings) {
   const box = toBox(node.absoluteBoundingBox);
   if (!box) return { allowedUse: 'implementation', reason: '' };
   const rootBox = toBox(rootNode.absoluteBoundingBox);
-  const hasText = hasTextDescendant(node);
+  const textScan = scanTextDescendant(node);
+  if (textScan.truncated) {
+    warnings.push({
+      code: 'TEXT_DESCENDANT_SCAN_TRUNCATED',
+      message: `Text descendant scan was truncated for ${node.name || node.id}; treating the asset as reference-only.`,
+      hint: 'Select a smaller frame or rerun extraction on the affected component if this asset must be used directly.',
+    });
+  }
+  const hasText = textScan.hasText || textScan.truncated;
   const layoutContainer = isLayoutContainer(node);
   const largeContainer = isLargeAssetCandidate(node, box, rootNode);
   if (hasText) {
@@ -671,6 +786,41 @@ function assetUsePolicy(node, rootNode) {
     };
   }
   return { allowedUse: 'implementation', reason: '' };
+}
+
+function missingNodeAssetEvidence(node, vector, policy, baseId) {
+  if (vector) {
+    return {
+      artifactId: `${baseId}_svg`,
+      fallbackArtifactId: `${baseId}_png`,
+      nodeId: node.id,
+      kind: 'svg',
+      preferredFormat: 'svg',
+      allowedUse: policy.allowedUse,
+      sourceKind: 'vector',
+      mediaType: 'image/svg+xml',
+      fallbackMediaType: 'image/png',
+    };
+  }
+  return {
+    artifactId: `${baseId}_png`,
+    nodeId: node.id,
+    kind: 'image',
+    preferredFormat: 'png',
+    allowedUse: policy.allowedUse,
+    sourceKind: 'node-export',
+    mediaType: 'image/png',
+  };
+}
+
+function missingImageFillAssetEvidence(node) {
+  return {
+    nodeId: node.id,
+    kind: 'image',
+    preferredFormat: 'unknown',
+    allowedUse: 'implementation',
+    sourceKind: 'image-fill',
+  };
 }
 
 function isThinDecorativeAsset(node, box, rootBox) {
@@ -706,10 +856,29 @@ function directImagePaints(node) {
 }
 
 function hasTextDescendant(node) {
-  if (!node) return false;
-  if (node.type === 'TEXT' || typeof node.characters === 'string') return true;
-  if (!('children' in node)) return false;
-  return node.children.some((child) => hasTextDescendant(child));
+  const result = scanTextDescendant(node);
+  return result.hasText || result.truncated;
+}
+
+function scanTextDescendant(node) {
+  let hasText = false;
+  if (!node) return { hasText: false, truncated: false, visitedCount: 0, reason: '' };
+  const summary = walkFigmaDeep(node, (current) => {
+    if (current.type === 'TEXT' || typeof current.characters === 'string') {
+      hasText = true;
+      return false;
+    }
+    return true;
+  }, {
+    maxDepth: TEXT_DESCENDANT_SCAN_MAX_DEPTH,
+    maxNodes: TEXT_DESCENDANT_SCAN_MAX_NODES,
+  });
+  return {
+    hasText,
+    truncated: Boolean(summary.truncated),
+    visitedCount: summary.visitedCount,
+    reason: summary.reason || '',
+  };
 }
 
 function firstSolidFillColor(node) {
@@ -787,6 +956,15 @@ function safeClone(value) {
 
 function safeName(value) {
   return String(value || 'selection').replace(/[^a-zA-Z0-9._-]+/g, '-').slice(0, 80) || 'selection';
+}
+
+function errorMessage(error) {
+  return error && error.message ? error.message : String(error);
+}
+
+function pluginErrorHint(error) {
+  if (!error || !error.stack) return undefined;
+  return String(error.stack).slice(0, 1500);
 }
 
 function stripUndefined(value) {

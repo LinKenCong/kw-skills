@@ -96,6 +96,7 @@ program.command('extract')
   .option('--manage-service', 'Start the runtime service if needed and stop it when extraction finishes')
   .option('--stop-service-after', 'Stop the runtime service after extraction finishes')
   .option('--wait-session <ms>', 'Wait for a plugin session before creating the extraction job')
+  .option('--no-assets', 'Skip Figma asset export; keep text/layout/screenshot extraction')
   .action(wrap(async (options) => {
     const projectRoot = path.resolve(options.project);
     const managed = Boolean(options.manageService);
@@ -115,7 +116,7 @@ program.command('extract')
         body: {
           capability: 'extract.selection',
           ...(options.session ? { sessionId: options.session } : {}),
-          options: { screenshots: true, assets: true },
+          options: { screenshots: true, assets: options.assets !== false },
         },
       }) as { ok: boolean; job: { jobId: string } };
       const job = await waitForJob(lock, create.job.jobId, Number(options.timeout));

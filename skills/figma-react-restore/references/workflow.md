@@ -37,25 +37,35 @@ The runtime service is only needed for Figma Desktop plugin connection and extra
    The plugin connects automatically to `http://localhost:49327`; no token, Register button, or Event button is required. If the plugin was opened before the managed service exists, it may briefly show a connection failure; leave it open or reopen it so it can reconnect.
 
 4. If you already have the plugin open and connected, the same extraction command will use that session.
-5. Ensure the runtime service is stopped after extraction completes. `--manage-service` stops services it started; otherwise run:
+5. If extraction is blocked by asset export or upload failures, retry once with a layout/text-only extraction:
+
+   ```bash
+   figma-react-restore extract --selection --manage-service --no-assets
+   ```
+
+   Treat `--no-assets` as a recovery path, not final evidence. It writes `ASSET_EXPORT_DISABLED` and should be followed by a normal extraction before final image/icon/photo verification.
+
+6. Ensure the runtime service is stopped after extraction completes. `--manage-service` stops services it started; otherwise run:
 
    ```bash
    figma-react-restore service stop --project .
    ```
 
-6. Build restoration evidence:
+7. Build restoration evidence:
 
    ```bash
    figma-react-restore build-ir --run <runId>
    ```
 
-7. Verify or restore the React route:
+8. Verify or restore the React route:
 
    ```bash
    figma-react-restore restore --project . --route http://localhost:3000 --run <runId> --max-iterations 3
    ```
 
-8. Read `agent-brief.json` and `text-manifest.json` first, patch the React code, then rerun `restore` until it passes or reports `blocked`.
+9. Read `agent-brief.json` and `text-manifest.json` first, patch the React code, then rerun `restore` until it passes or reports `blocked`.
+
+Asset export is best-effort. If an individual asset fails, the plugin should keep `extraction.raw.json`, record `ASSET_EXPORT_FAILED`, `IMAGE_FILL_EXPORT_FAILED`, or `ASSET_ARTIFACT_UPLOAD_FAILED`, and let downstream verification report missing required assets instead of losing text/layout evidence.
 
 ## Optional Manual Service Flow
 

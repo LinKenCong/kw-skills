@@ -384,20 +384,33 @@ function handleJob(job, source) {
 }
 
 async function finishExtraction(message) {
+  const extraction = message.extraction || {};
+  if (!Array.isArray(extraction.warnings)) extraction.warnings = [];
   for (let i = 0; i < message.artifacts.length; i += 1) {
     const artifact = message.artifacts[i];
-    const dataBase64 = bytesToBase64(artifact.bytes);
-    await uploadArtifactWithRetry(message.jobId, {
-      artifactId: artifact.artifactId,
-      kind: artifact.kind,
-      fileName: artifact.fileName,
-      mediaType: artifact.mediaType,
-      sourceNodeId: artifact.sourceNodeId,
-      dataBase64,
-    }, i + 1, message.artifacts.length);
+    try {
+      const dataBase64 = bytesToBase64(artifact.bytes);
+      await uploadArtifactWithRetry(message.jobId, {
+        artifactId: artifact.artifactId,
+        kind: artifact.kind,
+        fileName: artifact.fileName,
+        mediaType: artifact.mediaType,
+        sourceNodeId: artifact.sourceNodeId,
+        dataBase64,
+      }, i + 1, message.artifacts.length);
+    } catch (error) {
+      if (artifact.kind !== 'asset') throw error;
+      const normalized = normalizeErrorPayload(error);
+      extraction.warnings.push({
+        code: 'ASSET_ARTIFACT_UPLOAD_FAILED',
+        message: `Failed to upload asset artifact ${artifact.artifactId}: ${normalized.message}`,
+        hint: normalized.hint || 'The extraction was kept for layout/text evidence; rerun with a smaller selection if this asset is required.',
+      });
+      log(`Skipped failed asset upload ${artifact.artifactId}: ${normalized.code}`);
+    }
   }
   state.jobTracker.mark(message.jobId, protocol.JOB_STATUS.reporting);
-  await postJobJson(message.jobId, `/jobs/${message.jobId}/result`, { ok: true, result: message.extraction });
+  await postJobJson(message.jobId, `/jobs/${message.jobId}/result`, { ok: true, result: extraction });
   log(`Extraction completed for job ${message.jobId}`);
 }
 
@@ -476,6 +489,15 @@ function normalizeErrorPayload(error) {
       recoverable: error.code === 'ARTIFACT_TOO_LARGE' || error.code === 'UPLOAD_BASE64_TOO_LARGE' ? false : (error.recoverable !== false),
       hint: error.hint || (error.retryable ? 'The runtime request is retryable; retry extraction after runtime recovers.' : 'Retry extraction or reduce selection scope.'),
       httpStatus: error.httpStatus,
+    };
+  }
+  if (error && typeof error === 'object' && typeof error.message === 'string') {
+    return {
+      code: typeof error.code === 'string' ? error.code : 'PLUGIN_EXCEPTION',
+      message: error.message,
+      recoverable: typeof error.recoverable === 'boolean' ? error.recoverable : true,
+      hint: typeof error.hint === 'string' ? error.hint : 'Retry extraction or reduce selection scope.',
+      httpStatus: typeof error.httpStatus === 'number' ? error.httpStatus : undefined,
     };
   }
   const message = error.message || String(error);
@@ -628,9 +650,12 @@ function handleConnectionError(error) {
 function bytesToBase64(bytes) {
   const array = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   let binary = '';
-  const chunkSize = 0x8000;
+  const chunkSize = 0x2000;
   for (let i = 0; i < array.length; i += chunkSize) {
-    binary += String.fromCharCode.apply(null, array.subarray(i, i + chunkSize));
+    const end = Math.min(i + chunkSize, array.length);
+    let chunk = '';
+    for (let j = i; j < end; j += 1) chunk += String.fromCharCode(array[j]);
+    binary += chunk;
   }
   return btoa(binary);
 }

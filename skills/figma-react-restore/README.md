@@ -30,6 +30,7 @@ figma-react-restore service dev
 figma-react-restore service stop
 figma-react-restore sessions
 figma-react-restore extract --selection --manage-service
+figma-react-restore extract --selection --manage-service --no-assets
 figma-react-restore build-ir --run <runId>
 figma-react-restore verify --project . --route http://localhost:3000 --spec <spec>
 figma-react-restore repair-plan --report <report>
@@ -42,6 +43,8 @@ Run these from the React project root, or pass the same `--project <react-projec
 `build-ir` writes `design-ir.json`, `text-manifest.json`, and `fidelity-spec.json`. `text-manifest.json` is the authoritative source for visible copy; do not infer text from screenshots when Figma text nodes are available.
 
 Image/icon/photo assets must come from extraction artifacts. The plugin exports direct Figma image fills separately from whole-node raster exports so frames can use real image backgrounds with live DOM text overlays. Assets marked `allowedUse: "reference-only"` are visual evidence only and must not be rendered in the React page. If an expected image asset is missing, rerun extraction; do not draw or replace it with a lookalike.
+
+Asset export is best-effort: a bad image/vector node or oversized upload should add warnings and still write `extraction.raw.json` so text/layout work can continue. Use `extract --selection --manage-service --no-assets` only as a recovery path for layout/text extraction; rerun without `--no-assets` before final asset verification.
 
 If exact text, DOM boxes, and computed typography match but text-region pixels still differ, the verifier records a font-rendering warning instead of forcing more text repair. Install the design font locally for closer raster fidelity, or continue restoring non-font layout/assets/colors.
 

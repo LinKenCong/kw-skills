@@ -7,6 +7,7 @@ Use after automated tests pass.
 3. In Figma Desktop, import `plugin/manifest.json`, select one frame, then open the development plugin. It should auto-connect to `http://localhost:49327` after extraction starts, without token entry or Register/Event clicks.
    - This uses a development plugin and must not require Dev Mode, REST API access, Marketplace publishing, or plugin payments. Starter plan files should work; Organization or Enterprise files may still have seat/admin restrictions.
 4. Run `extract --selection --manage-service`, confirm the command stops its managed service after extraction, then run `build-ir --run <runId> --route <route>` and `restore --project <project> --route <route> --run <runId>`.
+   - If extraction reaches the assets stage and fails, retry `extract --selection --manage-service --no-assets` and confirm it still writes `extraction.raw.json` with `ASSET_EXPORT_DISABLED`; then rerun without `--no-assets` before final asset verification.
 5. If a manual service was used instead, run `service stop --project <react-project>` before build/restore and keep `.figma-react-restore/runs/<runId>/` intact.
 6. Confirm `.figma-react-restore/runs/<runId>/text-manifest.json` contains all visible Figma text, including deeply nested component text.
 7. Confirm `.figma-react-restore/runs/<runId>/restore/attempts/001/` contains `expected.png`, `actual.png`, `diff.png`, `trace.zip`, `report.json`, `repair-plan.json`, `agent-brief.json`, and `implementation-brief.json`.
