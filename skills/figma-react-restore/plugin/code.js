@@ -58,7 +58,7 @@ async function extractSelection(job) {
   const parent = commonParent(selection);
   const rootNode = selection.length === 1 || !parent || parent.type === 'PAGE' ? selection[0] : parent;
   figma.ui.postMessage({ type: 'progress', jobId, progress: { stage: 'serialize', message: 'Serializing selected node tree', progress: 0.2 } });
-  const root = serializeNode(rootNode, 0);
+  const root = serializeNode(rootNode, 0, 0, undefined);
   const warnings = [];
   const regions = collectRegions(root);
   const textResult = collectTextsFromFigma(rootNode);
@@ -116,16 +116,53 @@ async function extractSelection(job) {
   figma.ui.postMessage({ type: 'extraction-ready', jobId, artifacts, extraction });
 }
 
-function serializeNode(node, depth) {
+function serializeNode(node, depth, childIndex, parentNodeId) {
   const result = {
     id: node.id,
     name: node.name,
+    parentNodeId,
     type: node.type,
     visible: node.visible,
+    childIndex,
+    zIndex: childIndex,
   };
   const box = toBox(node.absoluteBoundingBox);
   if (box) result.absoluteBoundingBox = box;
-  for (const key of ['fills', 'strokes', 'effects', 'cornerRadius', 'layoutMode', 'itemSpacing', 'paddingLeft', 'paddingRight', 'paddingTop', 'paddingBottom']) {
+  for (const key of [
+    'fills',
+    'strokes',
+    'strokeWeight',
+    'strokeAlign',
+    'effects',
+    'cornerRadius',
+    'topLeftRadius',
+    'topRightRadius',
+    'bottomRightRadius',
+    'bottomLeftRadius',
+    'opacity',
+    'blendMode',
+    'constraints',
+    'clipsContent',
+    'rotation',
+    'relativeTransform',
+    'layoutMode',
+    'layoutWrap',
+    'itemSpacing',
+    'counterAxisSpacing',
+    'primaryAxisSizingMode',
+    'counterAxisSizingMode',
+    'primaryAxisAlignItems',
+    'counterAxisAlignItems',
+    'layoutSizingHorizontal',
+    'layoutSizingVertical',
+    'layoutAlign',
+    'layoutGrow',
+    'layoutPositioning',
+    'paddingLeft',
+    'paddingRight',
+    'paddingTop',
+    'paddingBottom',
+  ]) {
     if (key in node) result[key] = safeClone(node[key]);
   }
   if ('characters' in node) result.characters = node.characters;
@@ -139,7 +176,7 @@ function serializeNode(node, depth) {
   if ('textAlignVertical' in node) result.textAlignVertical = simpleValue(node.textAlignVertical);
   if ('textAutoResize' in node) result.textAutoResize = simpleValue(node.textAutoResize);
   if ('children' in node && depth < 6) {
-    result.children = node.children.slice(0, 240).map((child) => serializeNode(child, depth + 1));
+    result.children = node.children.slice(0, 240).map((child, index) => serializeNode(child, depth + 1, index, node.id));
   }
   return stripUndefined(result);
 }
@@ -149,13 +186,15 @@ function collectRegions(root) {
   walk(root, (node, index) => {
     if (!node.absoluteBoundingBox) return;
     const kind = index === 0 ? 'page' : node.type === 'TEXT' ? 'text' : node.type === 'FRAME' || node.type === 'SECTION' || node.type === 'GROUP' ? 'section' : node.type === 'COMPONENT' || node.type === 'INSTANCE' ? 'component' : hasImageFill(node) ? 'image' : 'unknown';
+    const strictness = kind === 'page' || kind === 'section' ? 'layout' : kind === 'unknown' ? 'perceptual' : 'strict';
     regions.push({
       regionId: node.id,
       nodeId: node.id,
       name: node.name,
       kind,
       box: node.absoluteBoundingBox,
-      strictness: kind === 'page' || kind === 'section' ? 'layout' : kind === 'unknown' ? 'perceptual' : 'strict',
+      strictness,
+      mapping: mappingForRegion(kind, strictness),
     });
   });
   return regions.map(stripUndefined);
@@ -230,18 +269,116 @@ function collectTypographyFromTexts(texts) {
 function collectLayoutHints(root) {
   const hints = [];
   walk(root, (node) => {
-    if (!node.layoutMode && node.itemSpacing == null && node.paddingLeft == null) return;
+    if (!hasLayoutHintEvidence(node)) return;
+    const paddingEdges = paddingEdgesForNode(node);
+    const alignment = alignmentForNode(node);
+    const sizing = sizingForNode(node);
+    const radius = radiusForNode(node);
     hints.push(stripUndefined({
       nodeId: node.id,
+      parentNodeId: node.parentNodeId,
       name: node.name,
       display: node.layoutMode ? 'flex' : undefined,
       direction: node.layoutMode === 'HORIZONTAL' ? 'row' : node.layoutMode === 'VERTICAL' ? 'column' : undefined,
+      alignment,
+      sizing,
+      constraints: objectValue(node.constraints),
+      wrap: simpleValue(node.layoutWrap),
+      clipsContent: typeof node.clipsContent === 'boolean' ? node.clipsContent : undefined,
       gap: node.itemSpacing,
-      padding: [node.paddingTop || 0, node.paddingRight || 0, node.paddingBottom || 0, node.paddingLeft || 0],
+      padding: paddingEdges ? [paddingEdges.top, paddingEdges.right, paddingEdges.bottom, paddingEdges.left] : undefined,
+      paddingEdges,
+      zIndex: typeof node.zIndex === 'number' ? node.zIndex : node.childIndex,
+      layerIndex: typeof node.childIndex === 'number' ? node.childIndex : undefined,
+      radius,
+      effects: Array.isArray(node.effects) ? node.effects : undefined,
+      opacity: typeof node.opacity === 'number' ? node.opacity : undefined,
       box: node.absoluteBoundingBox,
     }));
   });
   return hints;
+}
+
+function mappingForRegion(kind, strictness) {
+  if (strictness === 'ignored') return 'ignored';
+  if (kind === 'text' || kind === 'image') return 'required';
+  return 'optional';
+}
+
+function hasLayoutHintEvidence(node) {
+  return Boolean(
+    node.layoutMode ||
+    node.itemSpacing != null ||
+    node.paddingLeft != null ||
+    node.paddingRight != null ||
+    node.paddingTop != null ||
+    node.paddingBottom != null ||
+    node.primaryAxisAlignItems ||
+    node.counterAxisAlignItems ||
+    node.primaryAxisSizingMode ||
+    node.counterAxisSizingMode ||
+    node.layoutSizingHorizontal ||
+    node.layoutSizingVertical ||
+    node.layoutAlign ||
+    node.layoutGrow != null ||
+    node.layoutPositioning ||
+    node.layoutWrap ||
+    node.constraints != null ||
+    node.clipsContent != null ||
+    node.childIndex != null ||
+    node.zIndex != null ||
+    node.cornerRadius != null ||
+    node.topLeftRadius != null ||
+    node.topRightRadius != null ||
+    node.bottomRightRadius != null ||
+    node.bottomLeftRadius != null ||
+    node.effects != null ||
+    node.opacity != null
+  );
+}
+
+function paddingEdgesForNode(node) {
+  const hasPadding = node.layoutMode || node.paddingLeft != null || node.paddingRight != null || node.paddingTop != null || node.paddingBottom != null;
+  if (!hasPadding) return undefined;
+  return {
+    top: node.paddingTop || 0,
+    right: node.paddingRight || 0,
+    bottom: node.paddingBottom || 0,
+    left: node.paddingLeft || 0,
+  };
+}
+
+function alignmentForNode(node) {
+  const alignment = stripUndefined({
+    primaryAxis: simpleValue(node.primaryAxisAlignItems),
+    counterAxis: simpleValue(node.counterAxisAlignItems),
+    textHorizontal: simpleValue(node.textAlignHorizontal),
+    textVertical: simpleValue(node.textAlignVertical),
+  });
+  return Object.keys(alignment).length ? alignment : undefined;
+}
+
+function sizingForNode(node) {
+  const sizing = stripUndefined({
+    horizontal: simpleValue(node.layoutSizingHorizontal),
+    vertical: simpleValue(node.layoutSizingVertical),
+    primaryAxis: simpleValue(node.primaryAxisSizingMode),
+    counterAxis: simpleValue(node.counterAxisSizingMode),
+    layoutGrow: typeof node.layoutGrow === 'number' ? node.layoutGrow : undefined,
+    layoutAlign: simpleValue(node.layoutAlign),
+    layoutPositioning: simpleValue(node.layoutPositioning),
+  });
+  return Object.keys(sizing).length ? sizing : undefined;
+}
+
+function radiusForNode(node) {
+  const topLeft = numberValue(node.topLeftRadius);
+  const topRight = numberValue(node.topRightRadius);
+  const bottomRight = numberValue(node.bottomRightRadius);
+  const bottomLeft = numberValue(node.bottomLeftRadius);
+  const corners = stripUndefined({ topLeft, topRight, bottomRight, bottomLeft });
+  if (Object.keys(corners).length) return corners;
+  return numberValue(node.cornerRadius);
 }
 
 function walk(root, fn) {
@@ -618,6 +755,14 @@ function extensionFromMediaType(mediaType) {
 
 function simpleValue(value) {
   return typeof value === 'number' || typeof value === 'string' ? value : undefined;
+}
+
+function numberValue(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function objectValue(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : undefined;
 }
 
 function rgba(color, opacity) {

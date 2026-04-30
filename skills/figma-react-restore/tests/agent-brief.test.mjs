@@ -18,6 +18,7 @@ const baseReport = {
   ],
   domResults: [{ nodeId: 'n1', selector: '[data-figma-node="n1"]', status: 'missing', message: 'Missing DOM element with data-figma-node' }],
   textResults: [],
+  stateResults: [],
   failures: [
     { failureId: 'f3', category: 'color', severity: 'low', message: 'color mismatch', nodeId: 'n3' },
     { failureId: 'f1', category: 'layout-spacing', severity: 'high', message: 'layout mismatch', nodeId: 'n1', regionId: 'r1', expected: { box: { x: 0, y: 0, w: 100, h: 80 } }, actual: { box: { x: 3, y: 4, w: 90, h: 80 } } },
@@ -65,6 +66,28 @@ test('agent brief reports text failures before visual tuning failures', () => {
   assert.equal(brief.metrics.failedTextCount, 1);
   assert.equal(brief.topFailures[0].category, 'text-content');
   assert.ok(brief.tokenPolicy.readFirst.some((item) => item.includes('text-manifest.json')));
+});
+
+test('agent brief surfaces wrong-state and optional mapping guidance', () => {
+  const brief = createAgentBrief({
+    report: {
+      ...baseReport,
+      stateResults: [{ type: 'visible-text', status: 'failed', expected: { text: 'Checkout' }, actual: { visibleText: 'Cart' } }],
+      domResults: [{ nodeId: 's1', selector: '[data-figma-node="s1"]', mapping: 'optional', status: 'skipped', message: 'Optional DOM element with data-figma-node is not present; mapping check skipped' }],
+      warnings: [{ code: 'DOM_MAPPING_OPTIONAL_SKIPPED', message: 'Optional DOM mapping was skipped.' }],
+      failures: [
+        { failureId: 'f2', category: 'layout-spacing', severity: 'high', message: 'layout mismatch' },
+        { failureId: 'f1', category: 'wrong-state', severity: 'high', message: 'state mismatch', expected: { text: 'Checkout' }, actual: { visibleText: 'Cart' } },
+      ],
+    },
+  });
+  assert.equal(brief.metrics.failedStateCount, 1);
+  assert.equal(brief.metrics.failedDomCount, 0);
+  assert.equal(brief.topFailures[0].category, 'wrong-state');
+  assert.ok(brief.tokenPolicy.readFirst.some((item) => item.includes('report.stateResults')));
+  assert.match(brief.nextActions.join('\n'), /wrong-state/);
+  const summary = createCliSummary(brief);
+  assert.equal(summary.failedStateCount, 1);
 });
 
 test('agent brief file writer uses sibling repair plan and creates CLI summary', () => {

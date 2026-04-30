@@ -10,6 +10,7 @@ import { runDoctor } from '../doctor/index.js';
 import { readJsonFile } from '../json.js';
 import { DEFAULT_PORT } from '../paths.js';
 import { createRepairPlanFromFile } from '../restore/repair-plan.js';
+import { routeStateContractSchema, type RouteStateContract } from '../schema.js';
 import { assertReactProjectRoot } from '../react/project.js';
 import { runRestoreAttempt } from '../restore/loop.js';
 import { startDevRuntimeService } from '../service/dev.js';
@@ -131,11 +132,18 @@ program.command('build-ir')
   .option('--route <url>', 'Route URL to embed in fidelity spec', '')
   .option('--viewport <size>', 'Viewport WIDTHxHEIGHT, defaults to frame size')
   .option('--dpr <number>', 'Device pixel ratio', parseFloatOption, 1)
+  .option('--wait-selector <selector>', 'Route state selector that must be visible before screenshot')
+  .option('--expect-text <text>', 'Visible text that must exist for the intended route state; repeatable', collectOption, [])
+  .option('--local-storage <key=value>', 'localStorage entry to set before route load; repeatable', collectOption, [])
+  .option('--cookie <name=value>', 'Cookie to set before route load; repeatable', collectOption, [])
+  .option('--setup-script <js>', 'JavaScript setup script injected before route load')
+  .option('--state-json <path>', 'Route state contract JSON to merge into fidelity spec')
   .action(wrap(async (options) => {
     const store = new ArtifactStore({ workspaceRoot: options.project });
     const ir = buildMinimalDesignIr(options.run, store);
     const viewport = parseViewport(options.viewport, options.dpr);
-    const spec = buildFidelitySpec({ runId: options.run, ir, route: options.route, viewport, store });
+    const routeState = routeStateFromCliOptions(options);
+    const spec = buildFidelitySpec({ runId: options.run, ir, route: options.route, viewport, ...(routeState ? { routeState } : {}), store });
     printJson({
       ok: true,
       runId: options.run,
@@ -144,6 +152,7 @@ program.command('build-ir')
       fidelitySpecPath: store.findArtifact(options.run, 'fidelity-spec')?.path,
       evidenceLevel: ir.evidenceLevel,
       viewport: spec.viewport,
+      routeState: Boolean(spec.routeState),
     });
   }));
 
@@ -153,13 +162,21 @@ program.command('verify')
   .requiredOption('--spec <path>', 'Fidelity spec JSON path')
   .option('--output-dir <dir>', 'Output directory for screenshots/report')
   .option('--wait-ms <ms>', 'Extra wait before screenshot', parseIntOption, 0)
+  .option('--wait-selector <selector>', 'Override/add route state selector that must be visible before screenshot')
+  .option('--expect-text <text>', 'Visible text that must exist for the intended route state; repeatable', collectOption, [])
+  .option('--local-storage <key=value>', 'localStorage entry to set before route load; repeatable', collectOption, [])
+  .option('--cookie <name=value>', 'Cookie to set before route load; repeatable', collectOption, [])
+  .option('--setup-script <js>', 'JavaScript setup script injected before route load')
+  .option('--state-json <path>', 'Route state contract JSON to merge at verify time')
   .option('--full-report', 'Print full verify report instead of token-optimized summary')
   .action(wrap(async (options) => {
+    const routeState = routeStateFromCliOptions(options);
     const verifyOptions = {
       projectRoot: path.resolve(options.project),
       route: options.route,
       specPath: path.resolve(options.spec),
       waitMs: Number(options.waitMs),
+      ...(routeState ? { routeState } : {}),
       ...(options.outputDir ? { outputDir: path.resolve(options.outputDir) } : {}),
     };
     const result = await runVerification(verifyOptions);
@@ -389,6 +406,10 @@ function wrap<T extends unknown[]>(fn: (...args: T) => Promise<void>): (...args:
   };
 }
 
+function collectOption(value: string, previous: string[]): string[] {
+  return [...previous, value];
+}
+
 function parseIntOption(value: string): number {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed)) throw new Error(`Expected integer option, got ${value}`);
@@ -406,4 +427,59 @@ function parseViewport(value: string | undefined, dpr: number): { width?: number
   const match = /^(\d+)x(\d+)$/i.exec(value.trim());
   if (!match) throw new Error('Viewport must be WIDTHxHEIGHT, for example 1440x900');
   return { width: Number(match[1]), height: Number(match[2]), dpr };
+}
+
+function routeStateFromCliOptions(options: Record<string, unknown>): RouteStateContract | undefined {
+  const base = typeof options.stateJson === 'string'
+    ? routeStateContractSchema.parse(readJsonFile(path.resolve(options.stateJson)))
+    : undefined;
+  const expectedVisibleText = [...(base?.expectedVisibleText || []), ...stringArray(options.expectText)];
+  const assertions = [...(base?.assertions || [])];
+  const localStorage = { ...(base?.localStorage || {}), ...parseKeyValueRecord(stringArray(options.localStorage)) };
+  const cookies = [
+    ...(base?.cookies || []),
+    ...parseKeyValuePairs(stringArray(options.cookie)).map(([name, value]) => ({ name, value })),
+  ];
+  const setupScript = [base?.setupScript, typeof options.setupScript === 'string' ? options.setupScript : undefined]
+    .filter((item): item is string => Boolean(item))
+    .join('\n');
+  const waitForSelector = typeof options.waitSelector === 'string' ? options.waitSelector : base?.waitForSelector;
+  const contract = {
+    ...(base || {}),
+    ...(waitForSelector ? { waitForSelector } : {}),
+    expectedVisibleText,
+    assertions,
+    cookies,
+    ...(Object.keys(localStorage).length > 0 ? { localStorage } : {}),
+    ...(setupScript ? { setupScript } : {}),
+  };
+  if (!hasRouteStateContract(contract)) return undefined;
+  return routeStateContractSchema.parse(contract);
+}
+
+function hasRouteStateContract(value: Partial<RouteStateContract>): boolean {
+  return Boolean(
+    value.waitForSelector ||
+    value.setupScript ||
+    (value.expectedVisibleText && value.expectedVisibleText.length > 0) ||
+    (value.assertions && value.assertions.length > 0) ||
+    (value.cookies && value.cookies.length > 0) ||
+    (value.localStorage && Object.keys(value.localStorage).length > 0)
+  );
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+}
+
+function parseKeyValueRecord(values: string[]): Record<string, string> {
+  return Object.fromEntries(parseKeyValuePairs(values));
+}
+
+function parseKeyValuePairs(values: string[]): Array<[string, string]> {
+  return values.map((value) => {
+    const index = value.indexOf('=');
+    if (index <= 0) throw new Error(`Expected key=value option, got ${value}`);
+    return [value.slice(0, index), value.slice(index + 1)];
+  });
 }

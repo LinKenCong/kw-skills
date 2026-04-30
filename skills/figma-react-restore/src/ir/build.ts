@@ -3,6 +3,7 @@ import { ArtifactStore } from '../artifact/store.js';
 import { readJsonFile } from '../json.js';
 import {
   type Box,
+  type DomMapping,
   minimalDesignIrSchema,
   rawExtractionSchema,
   textManifestSchema,
@@ -78,8 +79,11 @@ function writeTextManifest(runId: string, texts: TextEvidence[], warnings: Warni
 }
 
 function normalizeRegions(regions: Region[], rootBox?: Box): Region[] {
-  if (!rootBox) return regions;
-  return regions.map((region) => ({ ...region, box: normalizeBox(region.box, rootBox) }));
+  return regions.map((region) => ({
+    ...region,
+    mapping: region.mapping || defaultMappingForRegion(region.kind, region.strictness),
+    ...(rootBox ? { box: normalizeBox(region.box, rootBox) } : {}),
+  }));
 }
 
 function normalizeTexts(texts: TextEvidence[], rootBox?: Box): TextEvidence[] {
@@ -102,13 +106,15 @@ export function collectRegions(root?: RawFigmaNode): Region[] {
   visit(root, (node, index) => {
     if (!node.absoluteBoundingBox) return;
     const kind = mapNodeKind(node, index === 0);
+    const strictness = kind === 'page' || kind === 'section' ? 'layout' : kind === 'unknown' ? 'perceptual' : 'strict';
     regions.push({
       regionId: node.id,
       nodeId: node.id,
       ...(node.name ? { name: node.name } : {}),
       kind,
       box: node.absoluteBoundingBox,
-      strictness: kind === 'page' || kind === 'section' ? 'layout' : kind === 'unknown' ? 'perceptual' : 'strict',
+      strictness,
+      mapping: defaultMappingForRegion(kind, strictness),
     });
   });
   return regions;
@@ -159,18 +165,135 @@ export function collectLayoutHints(root?: RawFigmaNode): LayoutHint[] {
   if (!root) return [];
   const hints: LayoutHint[] = [];
   visit(root, (node) => {
-    if (!node.layoutMode && node.itemSpacing === undefined && node.paddingLeft === undefined) return;
+    if (!hasLayoutHintEvidence(node)) return;
+    const paddingEdges = paddingEdgesForNode(node);
+    const alignment = alignmentForNode(node);
+    const sizing = sizingForNode(node);
+    const constraints = recordFromUnknown(node.constraints);
+    const radius = radiusFromNode(node);
+    const effects = Array.isArray(node.effects) ? node.effects : undefined;
     hints.push({
       nodeId: node.id,
+      ...(node.parentNodeId ? { parentNodeId: node.parentNodeId } : {}),
       ...(node.name ? { name: node.name } : {}),
       ...(node.layoutMode ? { display: 'flex' } : {}),
       ...(node.layoutMode ? { direction: node.layoutMode === 'HORIZONTAL' ? 'row' : 'column' } : {}),
+      ...(alignment ? { alignment } : {}),
+      ...(sizing ? { sizing } : {}),
+      ...(constraints ? { constraints } : {}),
+      ...(node.layoutWrap ? { wrap: node.layoutWrap } : {}),
+      ...(typeof node.clipsContent === 'boolean' ? { clipsContent: node.clipsContent } : {}),
       ...(typeof node.itemSpacing === 'number' ? { gap: node.itemSpacing } : {}),
-      padding: [node.paddingTop || 0, node.paddingRight || 0, node.paddingBottom || 0, node.paddingLeft || 0],
+      ...(paddingEdges ? {
+        padding: [paddingEdges.top, paddingEdges.right, paddingEdges.bottom, paddingEdges.left],
+        paddingEdges,
+      } : {}),
+      ...(typeof node.zIndex === 'number' || typeof node.childIndex === 'number' ? { zIndex: node.zIndex ?? node.childIndex } : {}),
+      ...(typeof node.childIndex === 'number' ? { layerIndex: node.childIndex } : {}),
+      ...(radius !== undefined ? { radius } : {}),
+      ...(effects ? { effects } : {}),
+      ...(typeof node.opacity === 'number' ? { opacity: node.opacity } : {}),
       ...(node.absoluteBoundingBox ? { box: node.absoluteBoundingBox } : {}),
     });
   });
   return hints;
+}
+
+function defaultMappingForRegion(kind: Region['kind'], strictness: Region['strictness']): DomMapping {
+  if (strictness === 'ignored') return 'ignored';
+  if (kind === 'text' || kind === 'image') return 'required';
+  return 'optional';
+}
+
+function hasLayoutHintEvidence(node: RawFigmaNode): boolean {
+  return Boolean(
+    node.layoutMode ||
+    node.itemSpacing !== undefined ||
+    node.paddingLeft !== undefined ||
+    node.paddingRight !== undefined ||
+    node.paddingTop !== undefined ||
+    node.paddingBottom !== undefined ||
+    node.primaryAxisAlignItems ||
+    node.counterAxisAlignItems ||
+    node.primaryAxisSizingMode ||
+    node.counterAxisSizingMode ||
+    node.layoutSizingHorizontal ||
+    node.layoutSizingVertical ||
+    node.layoutAlign ||
+    node.layoutGrow !== undefined ||
+    node.layoutPositioning ||
+    node.layoutWrap ||
+    node.constraints !== undefined ||
+    node.clipsContent !== undefined ||
+    node.childIndex !== undefined ||
+    node.zIndex !== undefined ||
+    node.cornerRadius !== undefined ||
+    node.topLeftRadius !== undefined ||
+    node.topRightRadius !== undefined ||
+    node.bottomRightRadius !== undefined ||
+    node.bottomLeftRadius !== undefined ||
+    node.effects !== undefined ||
+    node.opacity !== undefined
+  );
+}
+
+function paddingEdgesForNode(node: RawFigmaNode): { top: number; right: number; bottom: number; left: number } | undefined {
+  const hasPadding = node.layoutMode || node.paddingLeft !== undefined || node.paddingRight !== undefined || node.paddingTop !== undefined || node.paddingBottom !== undefined;
+  if (!hasPadding) return undefined;
+  return {
+    top: node.paddingTop || 0,
+    right: node.paddingRight || 0,
+    bottom: node.paddingBottom || 0,
+    left: node.paddingLeft || 0,
+  };
+}
+
+function alignmentForNode(node: RawFigmaNode): LayoutHint['alignment'] | undefined {
+  const alignment = {
+    ...(node.primaryAxisAlignItems ? { primaryAxis: node.primaryAxisAlignItems } : {}),
+    ...(node.counterAxisAlignItems ? { counterAxis: node.counterAxisAlignItems } : {}),
+    ...(node.textAlignHorizontal ? { textHorizontal: node.textAlignHorizontal } : {}),
+    ...(node.textAlignVertical ? { textVertical: node.textAlignVertical } : {}),
+  };
+  return Object.keys(alignment).length > 0 ? alignment : undefined;
+}
+
+function sizingForNode(node: RawFigmaNode): LayoutHint['sizing'] | undefined {
+  const sizing = {
+    ...(node.layoutSizingHorizontal ? { horizontal: node.layoutSizingHorizontal } : {}),
+    ...(node.layoutSizingVertical ? { vertical: node.layoutSizingVertical } : {}),
+    ...(node.primaryAxisSizingMode ? { primaryAxis: node.primaryAxisSizingMode } : {}),
+    ...(node.counterAxisSizingMode ? { counterAxis: node.counterAxisSizingMode } : {}),
+    ...(typeof node.layoutGrow === 'number' ? { layoutGrow: node.layoutGrow } : {}),
+    ...(node.layoutAlign ? { layoutAlign: node.layoutAlign } : {}),
+    ...(node.layoutPositioning ? { layoutPositioning: node.layoutPositioning } : {}),
+  };
+  return Object.keys(sizing).length > 0 ? sizing : undefined;
+}
+
+function recordFromUnknown(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  return value as Record<string, unknown>;
+}
+
+function radiusFromNode(node: RawFigmaNode): LayoutHint['radius'] | undefined {
+  const cornerRadius = numberFromUnknown(node.cornerRadius);
+  const topLeft = numberFromUnknown(node.topLeftRadius);
+  const topRight = numberFromUnknown(node.topRightRadius);
+  const bottomRight = numberFromUnknown(node.bottomRightRadius);
+  const bottomLeft = numberFromUnknown(node.bottomLeftRadius);
+  const corners = {
+    ...(topLeft !== undefined ? { topLeft } : {}),
+    ...(topRight !== undefined ? { topRight } : {}),
+    ...(bottomRight !== undefined ? { bottomRight } : {}),
+    ...(bottomLeft !== undefined ? { bottomLeft } : {}),
+  };
+  if (Object.keys(corners).length > 0) return corners;
+  return cornerRadius;
+}
+
+function numberFromUnknown(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
 function visit(root: RawFigmaNode, fn: (node: RawFigmaNode, index: number) => void): void {

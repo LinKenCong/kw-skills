@@ -103,7 +103,7 @@ function recommendedAction(failure: Failure): string {
   const suffix = target ? ` (${target})` : '';
   switch (failure.category) {
     case 'wrong-state':
-      return `Set the route to the same visual state as the Figma frame before editing layout${suffix}.`;
+      return `Fix the route state contract before editing layout${suffix}: ${wrongStateExpectation(failure)}. Use wait selector, expected visible text, localStorage/cookie, setup script, or UI navigation to reach the Figma state.`;
     case 'scale-mismatch':
       return `Align viewport, page width, root scale, and screenshot baseline dimensions before local fixes${suffix}.`;
     case 'layout-spacing':
@@ -140,7 +140,9 @@ function buildNextActions(failures: RepairFailure[], report: VerifyReport): stri
   if (failures.length === 0) return ['Rerun verification; report failed but no concrete failure was produced.'];
   const first = failures[0]!;
   const actions: string[] = [];
-  if (first.category === 'scale-mismatch' || first.category === 'wrong-state') actions.push(first.recommendedAction);
+  const wrongState = failures.filter((failure) => failure.category === 'wrong-state').slice(0, 3);
+  if (wrongState.length > 0) actions.push(`Fix route state before CSS/layout repair: ${wrongState.map(labelFailure).join(' -> ')}.`);
+  if (first.category === 'scale-mismatch') actions.push(first.recommendedAction);
   const overlays = failures.filter((failure) => failure.category === 'screenshot-overlay').slice(0, 2);
   if (overlays.length > 0) actions.push(`Remove prohibited screenshot/large-raster overlays before any visual tuning: ${overlays.map(labelFailure).join(' -> ')}.`);
   const textContent = failures.filter((failure) => failure.category === 'text-content').slice(0, 5);
@@ -174,4 +176,12 @@ function labelFailureWithExpected(failure: RepairFailure): string {
 function expectedText(failure: Failure): string {
   const value = failure.expected?.text;
   return typeof value === 'string' ? value : '';
+}
+
+function wrongStateExpectation(failure: Failure): string {
+  if (typeof failure.expected?.text === 'string') return `expected visible text "${failure.expected.text}"`;
+  if (typeof failure.expected?.visible === 'boolean') return `expected visible=${failure.expected.visible}`;
+  if (typeof failure.expected?.key === 'string') return `expected localStorage key "${failure.expected.key}"`;
+  if (typeof failure.expected?.name === 'string') return `expected cookie "${failure.expected.name}"`;
+  return 'satisfy the failed state assertion from report.stateResults';
 }

@@ -69,6 +69,9 @@ export const viewportSchema = z.object({
 });
 export type Viewport = z.infer<typeof viewportSchema>;
 
+export const domMappingSchema = z.enum(['required', 'optional', 'ignored']);
+export type DomMapping = z.infer<typeof domMappingSchema>;
+
 export const regionSchema = z.object({
   regionId: z.string(),
   nodeId: z.string().optional(),
@@ -76,6 +79,7 @@ export const regionSchema = z.object({
   kind: z.enum(['page', 'section', 'component', 'text', 'image', 'unknown']),
   box: boxSchema,
   strictness: z.enum(['layout', 'strict', 'perceptual', 'ignored']),
+  mapping: domMappingSchema.optional(),
 });
 export type Region = z.infer<typeof regionSchema>;
 
@@ -140,13 +144,63 @@ export const typographyEvidenceSchema = z.object({
 });
 export type TypographyEvidence = z.infer<typeof typographyEvidenceSchema>;
 
+export const edgeValuesSchema = z.object({
+  top: z.number().optional(),
+  right: z.number().optional(),
+  bottom: z.number().optional(),
+  left: z.number().optional(),
+});
+export type EdgeValues = z.infer<typeof edgeValuesSchema>;
+
+export const cornerRadiusSchema = z.union([
+  z.number(),
+  z.object({
+    topLeft: z.number().optional(),
+    topRight: z.number().optional(),
+    bottomRight: z.number().optional(),
+    bottomLeft: z.number().optional(),
+  }),
+]);
+export type CornerRadius = z.infer<typeof cornerRadiusSchema>;
+
+export const layoutAlignmentSchema = z.object({
+  primaryAxis: z.string().optional(),
+  counterAxis: z.string().optional(),
+  textHorizontal: z.string().optional(),
+  textVertical: z.string().optional(),
+});
+export type LayoutAlignment = z.infer<typeof layoutAlignmentSchema>;
+
+export const layoutSizingSchema = z.object({
+  horizontal: z.string().optional(),
+  vertical: z.string().optional(),
+  primaryAxis: z.string().optional(),
+  counterAxis: z.string().optional(),
+  layoutGrow: z.number().optional(),
+  layoutAlign: z.string().optional(),
+  layoutPositioning: z.string().optional(),
+});
+export type LayoutSizing = z.infer<typeof layoutSizingSchema>;
+
 export const layoutHintSchema = z.object({
   nodeId: z.string().optional(),
+  parentNodeId: z.string().optional(),
   name: z.string().optional(),
   display: z.string().optional(),
   direction: z.string().optional(),
+  alignment: layoutAlignmentSchema.optional(),
+  sizing: layoutSizingSchema.optional(),
+  constraints: z.record(z.unknown()).optional(),
+  wrap: z.string().optional(),
+  clipsContent: z.boolean().optional(),
   gap: z.number().optional(),
   padding: z.union([z.number(), z.array(z.number())]).optional(),
+  paddingEdges: edgeValuesSchema.optional(),
+  zIndex: z.number().optional(),
+  layerIndex: z.number().optional(),
+  radius: cornerRadiusSchema.optional(),
+  effects: z.array(z.unknown()).optional(),
+  opacity: z.number().optional(),
   box: boxSchema.optional(),
 });
 export type LayoutHint = z.infer<typeof layoutHintSchema>;
@@ -171,12 +225,47 @@ export const minimalDesignIrSchema = z.object({
 });
 export type MinimalDesignIR = z.infer<typeof minimalDesignIrSchema>;
 
+export const routeStateAssertionSchema = z.object({
+  type: z.enum(['visible-text', 'selector-visible', 'selector-text', 'url-contains', 'local-storage', 'cookie']),
+  selector: z.string().optional(),
+  text: z.string().optional(),
+  key: z.string().optional(),
+  value: z.string().optional(),
+  name: z.string().optional(),
+});
+export type RouteStateAssertion = z.infer<typeof routeStateAssertionSchema>;
+
+export const routeStateCookieSchema = z.object({
+  name: z.string(),
+  value: z.string(),
+  url: z.string().optional(),
+  domain: z.string().optional(),
+  path: z.string().optional(),
+  expires: z.number().optional(),
+  httpOnly: z.boolean().optional(),
+  secure: z.boolean().optional(),
+  sameSite: z.enum(['Strict', 'Lax', 'None']).optional(),
+});
+export type RouteStateCookie = z.infer<typeof routeStateCookieSchema>;
+
+export const routeStateContractSchema = z.object({
+  waitForSelector: z.string().optional(),
+  waitTimeoutMs: z.number().int().positive().optional(),
+  expectedVisibleText: z.array(z.string()).default([]),
+  assertions: z.array(routeStateAssertionSchema).default([]),
+  localStorage: z.record(z.string()).optional(),
+  cookies: z.array(routeStateCookieSchema).default([]),
+  setupScript: z.string().optional(),
+});
+export type RouteStateContract = z.infer<typeof routeStateContractSchema>;
+
 export const fidelitySpecSchema = z.object({
   schemaVersion: z.literal(1),
   runId: z.string(),
   evidenceLevel: z.enum(['L3-structured', 'L2-partial', 'L1-visual-only', 'L0-blocked']).optional(),
   route: z.string(),
   viewport: viewportSchema,
+  routeState: routeStateContractSchema.optional(),
   baselineScreenshot: z.string(),
   regions: z.array(regionSchema),
   texts: z.array(textEvidenceSchema).default([]),
@@ -237,6 +326,7 @@ export type RegionResult = z.infer<typeof regionResultSchema>;
 export const domResultSchema = z.object({
   nodeId: z.string().optional(),
   selector: z.string(),
+  mapping: domMappingSchema.optional(),
   status: z.enum(['passed', 'failed', 'missing', 'skipped']),
   box: boxSchema.optional(),
   computed: z.record(z.string()).optional(),
@@ -256,6 +346,16 @@ export const textResultSchema = z.object({
 });
 export type TextResult = z.infer<typeof textResultSchema>;
 
+export const stateResultSchema = z.object({
+  type: z.enum(['wait-for-selector', 'visible-text', 'selector-visible', 'selector-text', 'url-contains', 'local-storage', 'cookie', 'setup-script']),
+  status: z.enum(['passed', 'failed', 'skipped']),
+  selector: z.string().optional(),
+  message: z.string().optional(),
+  expected: z.record(z.unknown()).optional(),
+  actual: z.record(z.unknown()).optional(),
+});
+export type StateResult = z.infer<typeof stateResultSchema>;
+
 export const verifyReportSchema = z.object({
   schemaVersion: z.literal(1),
   runId: z.string().optional(),
@@ -273,6 +373,7 @@ export const verifyReportSchema = z.object({
   regionResults: z.array(regionResultSchema),
   domResults: z.array(domResultSchema),
   textResults: z.array(textResultSchema).default([]),
+  stateResults: z.array(stateResultSchema).default([]),
   failures: z.array(failureSchema),
   warnings: z.array(warningSchema),
 });
@@ -330,6 +431,7 @@ export const agentBriefSchema = z.object({
     failedRegionCount: z.number().int().nonnegative(),
     failedDomCount: z.number().int().nonnegative(),
     failedTextCount: z.number().int().nonnegative().optional(),
+    failedStateCount: z.number().int().nonnegative().optional(),
     warningCount: z.number().int().nonnegative(),
   }),
   artifactPaths: z.object({
@@ -372,13 +474,28 @@ export const rawFigmaNodeSchema: z.ZodType<RawFigmaNode> = z.lazy(() =>
   z.object({
     id: z.string(),
     name: z.string().optional(),
+    parentNodeId: z.string().optional(),
     type: z.string().optional(),
     visible: z.boolean().optional(),
     absoluteBoundingBox: boxSchema.optional(),
+    childIndex: z.number().optional(),
+    zIndex: z.number().optional(),
     fills: z.unknown().optional(),
     strokes: z.unknown().optional(),
+    strokeWeight: z.unknown().optional(),
+    strokeAlign: z.string().optional(),
     effects: z.unknown().optional(),
     cornerRadius: z.unknown().optional(),
+    topLeftRadius: z.unknown().optional(),
+    topRightRadius: z.unknown().optional(),
+    bottomRightRadius: z.unknown().optional(),
+    bottomLeftRadius: z.unknown().optional(),
+    opacity: z.number().optional(),
+    blendMode: z.string().optional(),
+    constraints: z.unknown().optional(),
+    clipsContent: z.boolean().optional(),
+    rotation: z.number().optional(),
+    relativeTransform: z.unknown().optional(),
     characters: z.string().optional(),
     fontName: z.unknown().optional(),
     fontSize: z.number().optional(),
@@ -390,7 +507,18 @@ export const rawFigmaNodeSchema: z.ZodType<RawFigmaNode> = z.lazy(() =>
     textAlignVertical: z.string().optional(),
     textAutoResize: z.string().optional(),
     layoutMode: z.string().optional(),
+    layoutWrap: z.string().optional(),
     itemSpacing: z.number().optional(),
+    counterAxisSpacing: z.number().optional(),
+    primaryAxisSizingMode: z.string().optional(),
+    counterAxisSizingMode: z.string().optional(),
+    primaryAxisAlignItems: z.string().optional(),
+    counterAxisAlignItems: z.string().optional(),
+    layoutSizingHorizontal: z.string().optional(),
+    layoutSizingVertical: z.string().optional(),
+    layoutAlign: z.string().optional(),
+    layoutGrow: z.number().optional(),
+    layoutPositioning: z.string().optional(),
     paddingLeft: z.number().optional(),
     paddingRight: z.number().optional(),
     paddingTop: z.number().optional(),
@@ -401,13 +529,28 @@ export const rawFigmaNodeSchema: z.ZodType<RawFigmaNode> = z.lazy(() =>
 export type RawFigmaNode = {
   id: string;
   name?: string | undefined;
+  parentNodeId?: string | undefined;
   type?: string | undefined;
   visible?: boolean | undefined;
   absoluteBoundingBox?: Box | undefined;
+  childIndex?: number | undefined;
+  zIndex?: number | undefined;
   fills?: unknown;
   strokes?: unknown;
+  strokeWeight?: unknown;
+  strokeAlign?: string | undefined;
   effects?: unknown;
   cornerRadius?: unknown;
+  topLeftRadius?: unknown;
+  topRightRadius?: unknown;
+  bottomRightRadius?: unknown;
+  bottomLeftRadius?: unknown;
+  opacity?: number | undefined;
+  blendMode?: string | undefined;
+  constraints?: unknown;
+  clipsContent?: boolean | undefined;
+  rotation?: number | undefined;
+  relativeTransform?: unknown;
   characters?: string | undefined;
   fontName?: unknown;
   fontSize?: number | undefined;
@@ -419,7 +562,18 @@ export type RawFigmaNode = {
   textAlignVertical?: string | undefined;
   textAutoResize?: string | undefined;
   layoutMode?: string | undefined;
+  layoutWrap?: string | undefined;
   itemSpacing?: number | undefined;
+  counterAxisSpacing?: number | undefined;
+  primaryAxisSizingMode?: string | undefined;
+  counterAxisSizingMode?: string | undefined;
+  primaryAxisAlignItems?: string | undefined;
+  counterAxisAlignItems?: string | undefined;
+  layoutSizingHorizontal?: string | undefined;
+  layoutSizingVertical?: string | undefined;
+  layoutAlign?: string | undefined;
+  layoutGrow?: number | undefined;
+  layoutPositioning?: string | undefined;
   paddingLeft?: number | undefined;
   paddingRight?: number | undefined;
   paddingTop?: number | undefined;
