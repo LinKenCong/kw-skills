@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { buildDomMappingWarnings, buildDomResults, buildStateFailures, runVerification } from '../dist/verify/report.js';
+import { buildDomMappingWarnings, buildDomResults, buildStateFailures, defaultResponsiveSmokeViewports, runVerification } from '../dist/verify/report.js';
 
 function makeSpecRoot() {
   const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'frr-verify-project-'));
@@ -90,4 +90,11 @@ test('route state assertion failures become wrong-state failures', () => {
   assert.equal(failures[0].category, 'wrong-state');
   assert.equal(failures[0].severity, 'high');
   assert.deepEqual(failures[0].expected, { text: 'Checkout' });
+});
+
+test('responsive smoke exposes opt-in mobile and tablet defaults', () => {
+  const viewports = defaultResponsiveSmokeViewports();
+  assert.deepEqual(viewports.map((item) => item.name), ['mobile', 'tablet']);
+  assert.equal(viewports[0].viewport.width, 390);
+  assert.equal(viewports[0].viewport.dpr, 2);
 });

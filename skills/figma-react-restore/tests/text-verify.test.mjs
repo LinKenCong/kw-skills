@@ -146,3 +146,57 @@ test('asset verifier rejects reference-only exports when used as implementation 
   assert.equal(failures[0].category, 'screenshot-overlay');
   assert.match(failures[0].message, /Reference-only Figma node export/);
 });
+
+test('asset verifier allows semantic-equivalent vector icons with mapping and passing region', () => {
+  const failures = buildAssetUsageFailures([
+    {
+      artifactId: 'asset_icon',
+      nodeId: '43:icon',
+      path: 'runs/run_1/assets/search.svg',
+      kind: 'svg',
+      preferredFormat: 'svg',
+      mediaType: 'image/svg+xml',
+      allowedUse: 'implementation',
+      sourceKind: 'vector',
+    },
+  ], [
+    {
+      selector: '[data-figma-node="43:icon"] svg',
+      nodeId: '43:icon',
+      tagName: 'svg',
+      box: { x: 0, y: 0, w: 24, h: 24 },
+      semanticKind: 'inline-svg',
+    },
+  ], {
+    regions: [{ regionId: '43:icon', nodeId: '43:icon', name: 'Search Icon', kind: 'image', box: { x: 0, y: 0, w: 24, h: 24 }, strictness: 'strict', mapping: 'required' }],
+    regionResults: [{ regionId: '43:icon', nodeId: '43:icon', diffRatio: 0, diffPixels: 0, totalPixels: 576, status: 'passed' }],
+    domResults: [{ nodeId: '43:icon', selector: '[data-figma-node="43:icon"]', status: 'passed', box: { x: 0, y: 0, w: 24, h: 24 }, computed: {} }],
+  });
+  assert.equal(failures.length, 0);
+});
+
+test('asset verifier keeps image-fill and logo assets on extracted-file policy', () => {
+  const context = {
+    regions: [
+      { regionId: 'photo', nodeId: 'photo', name: 'Product Photo', kind: 'image', box: { x: 0, y: 0, w: 120, h: 80 }, strictness: 'strict', mapping: 'required' },
+      { regionId: 'logo', nodeId: 'logo', name: 'Brand Logo', kind: 'image', box: { x: 0, y: 0, w: 80, h: 24 }, strictness: 'strict', mapping: 'required' },
+    ],
+    regionResults: [
+      { regionId: 'photo', nodeId: 'photo', diffRatio: 0, diffPixels: 0, totalPixels: 9600, status: 'passed' },
+      { regionId: 'logo', nodeId: 'logo', diffRatio: 0, diffPixels: 0, totalPixels: 1920, status: 'passed' },
+    ],
+    domResults: [
+      { nodeId: 'photo', selector: '[data-figma-node="photo"]', status: 'passed', box: { x: 0, y: 0, w: 120, h: 80 }, computed: {} },
+      { nodeId: 'logo', selector: '[data-figma-node="logo"]', status: 'passed', box: { x: 0, y: 0, w: 80, h: 24 }, computed: {} },
+    ],
+  };
+  const failures = buildAssetUsageFailures([
+    { artifactId: 'asset_photo', nodeId: 'photo', path: 'runs/run_1/assets/product.png', kind: 'image', preferredFormat: 'png', mediaType: 'image/png', allowedUse: 'implementation', sourceKind: 'image-fill' },
+    { artifactId: 'asset_logo', nodeId: 'logo', path: 'runs/run_1/assets/brand-logo.svg', kind: 'svg', preferredFormat: 'svg', mediaType: 'image/svg+xml', allowedUse: 'implementation', sourceKind: 'vector' },
+  ], [
+    { selector: '[data-figma-node="photo"]', nodeId: 'photo', tagName: 'svg', box: { x: 0, y: 0, w: 120, h: 80 }, semanticKind: 'inline-svg' },
+    { selector: '[data-figma-node="logo"]', nodeId: 'logo', tagName: 'svg', box: { x: 0, y: 0, w: 80, h: 24 }, semanticKind: 'inline-svg' },
+  ], context);
+  assert.equal(failures.length, 2);
+  assert.ok(failures.every((failure) => failure.expected.policy === 'must-use-extracted-asset'));
+});

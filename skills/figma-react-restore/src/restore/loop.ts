@@ -8,7 +8,8 @@ import { relativeArtifactPath } from '../paths.js';
 import { repairPlanSchema, restoreAttemptSchema, type RestoreAttempt, type VerifyReport } from '../schema.js';
 import { waitForRoute } from '../react/project.js';
 import { createAgentBriefFromFiles } from '../summary/agent-brief.js';
-import { runVerification } from '../verify/report.js';
+import { createImplementationBriefFromFiles } from '../summary/implementation-brief.js';
+import { runVerification, type ResponsiveViewportSpec } from '../verify/report.js';
 import { createRepairPlanFromFile } from './repair-plan.js';
 
 export type RestoreOptions = {
@@ -18,6 +19,8 @@ export type RestoreOptions = {
   devCommand?: string;
   maxIterations?: number;
   waitMs?: number;
+  responsiveSmoke?: boolean;
+  responsiveViewports?: ResponsiveViewportSpec[];
 };
 
 export type RestoreResult = {
@@ -26,6 +29,7 @@ export type RestoreResult = {
   reportPath?: string;
   repairPlanPath?: string;
   agentBriefPath?: string;
+  implementationBriefPath?: string;
   blockedReason?: string;
 };
 
@@ -69,11 +73,20 @@ export async function runRestoreAttempt(options: RestoreOptions, store = new Art
       outputDir: attemptDir,
       attemptId,
       ...(options.waitMs !== undefined ? { waitMs: options.waitMs } : {}),
+      ...(options.responsiveSmoke ? { responsiveSmoke: options.responsiveSmoke } : {}),
+      ...(options.responsiveViewports && options.responsiveViewports.length > 0 ? { responsiveViewports: options.responsiveViewports } : {}),
     };
     const { report, reportPath } = await runVerification(verifyOptions);
     const { plan, planPath } = createRepairPlanFromFile(reportPath, path.join(attemptDir, 'repair-plan.json'));
     const briefPath = path.join(attemptDir, 'agent-brief.json');
     createAgentBriefFromFiles({ reportPath, planPath, outputPath: briefPath });
+    const implementationBriefPath = path.join(attemptDir, 'implementation-brief.json');
+    createImplementationBriefFromFiles({
+      reportPath,
+      agentBriefPath: briefPath,
+      outputPath: implementationBriefPath,
+      projectRoot: options.projectRoot,
+    });
     recordAttemptArtifacts(store, options.runId, report, reportPath, planPath, briefPath, attemptDir);
     const completed = restoreAttemptSchema.parse({
       ...attempt,
@@ -82,6 +95,7 @@ export async function runRestoreAttempt(options: RestoreOptions, store = new Art
       reportPath,
       repairPlanPath: planPath,
       agentBriefPath: briefPath,
+      implementationBriefPath,
     });
     writeJsonFile(path.join(attemptDir, 'attempt.json'), completed);
     appendAttempt(store, options.runId, completed, report);
@@ -91,7 +105,8 @@ export async function runRestoreAttempt(options: RestoreOptions, store = new Art
       const blockedPlan = repairPlanSchema.parse({ ...plan, status: 'blocked' as const, blockedReason, summary: blockedReason });
       writeJsonFile(planPath, blockedPlan);
       createAgentBriefFromFiles({ reportPath, planPath, outputPath: briefPath });
-      const result = { status: 'blocked' as const, attempt: completed, reportPath, repairPlanPath: planPath, agentBriefPath: briefPath, blockedReason };
+      createImplementationBriefFromFiles({ reportPath, agentBriefPath: briefPath, outputPath: implementationBriefPath, projectRoot: options.projectRoot });
+      const result = { status: 'blocked' as const, attempt: completed, reportPath, repairPlanPath: planPath, agentBriefPath: briefPath, implementationBriefPath, blockedReason };
       writeFinalReport(store, options.runId, result);
       return result;
     }
@@ -100,23 +115,24 @@ export async function runRestoreAttempt(options: RestoreOptions, store = new Art
       const blockedPlan = repairPlanSchema.parse({ ...plan, status: 'blocked' as const, blockedReason, summary: blockedReason });
       writeJsonFile(planPath, blockedPlan);
       createAgentBriefFromFiles({ reportPath, planPath, outputPath: briefPath });
+      createImplementationBriefFromFiles({ reportPath, agentBriefPath: briefPath, outputPath: implementationBriefPath, projectRoot: options.projectRoot });
       const blockedAttempt = restoreAttemptSchema.parse({ ...completed, status: 'blocked' });
       writeJsonFile(path.join(attemptDir, 'attempt.json'), blockedAttempt);
-      const result = { status: 'blocked' as const, attempt: blockedAttempt, reportPath, repairPlanPath: planPath, agentBriefPath: briefPath, blockedReason };
+      const result = { status: 'blocked' as const, attempt: blockedAttempt, reportPath, repairPlanPath: planPath, agentBriefPath: briefPath, implementationBriefPath, blockedReason };
       writeFinalReport(store, options.runId, result);
       return result;
     }
     if (report.status === 'passed') {
-      const result = { status: 'passed' as const, attempt: completed, reportPath, repairPlanPath: planPath, agentBriefPath: briefPath };
+      const result = { status: 'passed' as const, attempt: completed, reportPath, repairPlanPath: planPath, agentBriefPath: briefPath, implementationBriefPath };
       writeFinalReport(store, options.runId, result);
       return result;
     }
     if (plan.status === 'blocked') {
-      const result = { status: 'blocked' as const, attempt: completed, reportPath, repairPlanPath: planPath, agentBriefPath: briefPath, ...(plan.blockedReason ? { blockedReason: plan.blockedReason } : {}) };
+      const result = { status: 'blocked' as const, attempt: completed, reportPath, repairPlanPath: planPath, agentBriefPath: briefPath, implementationBriefPath, ...(plan.blockedReason ? { blockedReason: plan.blockedReason } : {}) };
       writeFinalReport(store, options.runId, result);
       return result;
     }
-    const result = { status: 'needs-agent-patch' as const, attempt: completed, reportPath, repairPlanPath: planPath, agentBriefPath: briefPath };
+    const result = { status: 'needs-agent-patch' as const, attempt: completed, reportPath, repairPlanPath: planPath, agentBriefPath: briefPath, implementationBriefPath };
     writeFinalReport(store, options.runId, result);
     return result;
   } catch (error) {
@@ -221,6 +237,7 @@ function writeFinalReport(store: ArtifactStore, runId: string, result: RestoreRe
     ...(result.reportPath ? { reportPath: relativeArtifactPath(store.artifactRoot, result.reportPath) } : {}),
     ...(result.repairPlanPath ? { repairPlanPath: relativeArtifactPath(store.artifactRoot, result.repairPlanPath) } : {}),
     ...(result.agentBriefPath ? { agentBriefPath: relativeArtifactPath(store.artifactRoot, result.agentBriefPath) } : {}),
+    ...(result.implementationBriefPath ? { implementationBriefPath: relativeArtifactPath(store.artifactRoot, result.implementationBriefPath) } : {}),
     ...(result.blockedReason ? { blockedReason: result.blockedReason } : {}),
   });
 }
