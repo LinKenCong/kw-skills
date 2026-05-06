@@ -14,7 +14,7 @@ const baseReport = {
   viewport: { width: 100, height: 80, dpr: 1 },
   fullPage: { diffRatio: 0.2, diffPixels: 1600, expectedPath: 'expected.png', actualPath: 'actual.png', diffPath: 'diff.png' },
   regionResults: [
-    { regionId: 'r1', nodeId: 'n1', diffRatio: 0.12, diffPixels: 12, totalPixels: 100, diffPath: 'regions/r1.diff.png', status: 'failed' },
+    { regionId: 'r1', nodeId: 'n1', diffRatio: 0.12, diffPixels: 12, totalPixels: 100, expectedPath: 'regions/node-n1.expected.png', diffPath: 'regions/node-n1.diff.png', status: 'failed' },
     { regionId: 'r2', nodeId: 'n2', diffRatio: 0.01, diffPixels: 1, totalPixels: 100, status: 'passed' },
   ],
   domResults: [{ nodeId: 'n1', selector: '[data-figma-node="n1"]', status: 'missing', message: 'Missing DOM element with data-figma-node' }],
@@ -51,6 +51,8 @@ test('agent brief keeps prioritized compact failures and token policy', () => {
   assert.equal(brief.topFailures[0].recommendedAction, 'Fix layout first');
   assert.equal(brief.topRegions[0].regionId, 'r1');
   assert.ok(brief.tokenPolicy.avoidByDefault.includes('extraction.raw.json'));
+  assert.ok(brief.tokenPolicy.readFirst.some((item) => item.includes('full-page diff')));
+  assert.ok(brief.tokenPolicy.readFirst.some((item) => item.includes('one item at a time')));
 });
 
 test('agent brief reports text failures before visual tuning failures', () => {
@@ -89,6 +91,75 @@ test('agent brief surfaces wrong-state and optional mapping guidance', () => {
   assert.match(brief.nextActions.join('\n'), /wrong-state/);
   const summary = createCliSummary(brief);
   assert.equal(summary.failedStateCount, 1);
+});
+
+test('agent brief requires Top 5 retained visual evidence paths', () => {
+  const regionResults = [
+    { regionId: 'low-failed', nodeId: 'n-low', diffRatio: 0.15, diffPixels: 15, totalPixels: 100, status: 'failed' },
+    { regionId: 'top-1', nodeId: 'n1', diffRatio: 0.90, diffPixels: 90, totalPixels: 100, expectedPath: 'verify/attempt_1/regions/node-n1.expected.png', diffPath: 'verify/attempt_1/regions/node-n1.diff.png', status: 'failed' },
+    { regionId: 'top-2', nodeId: 'n2', diffRatio: 0.80, diffPixels: 80, totalPixels: 100, expectedPath: 'verify/attempt_1/regions/node-n2.expected.png', diffPath: 'verify/attempt_1/regions/node-n2.diff.png', status: 'failed' },
+    { regionId: 'top-3', nodeId: 'n3', diffRatio: 0.70, diffPixels: 70, totalPixels: 100, expectedPath: 'verify/attempt_1/regions/node-n3.expected.png', diffPath: 'verify/attempt_1/regions/node-n3.diff.png', status: 'failed' },
+    { regionId: 'top-4', nodeId: 'n4', diffRatio: 0.60, diffPixels: 60, totalPixels: 100, expectedPath: 'verify/attempt_1/regions/node-n4.expected.png', diffPath: 'verify/attempt_1/regions/node-n4.diff.png', status: 'failed' },
+    { regionId: 'top-5', nodeId: 'n5', diffRatio: 0.50, diffPixels: 50, totalPixels: 100, expectedPath: 'verify/attempt_1/regions/node-n5.expected.png', diffPath: 'verify/attempt_1/regions/node-n5.diff.png', status: 'failed' },
+    { regionId: 'passed-region', nodeId: 'n-pass', diffRatio: 0, diffPixels: 0, totalPixels: 100, status: 'passed' },
+  ];
+  const brief = createAgentBrief({
+    report: {
+      ...baseReport,
+      regionResults,
+      failures: regionResults
+        .filter((region) => region.status === 'failed')
+        .map((region, index) => ({
+          failureId: `f-region-${index}`,
+          category: 'layout-spacing',
+          severity: 'high',
+          message: `Region ${region.regionId} mismatch`,
+          regionId: region.regionId,
+          nodeId: region.nodeId,
+        })),
+    },
+  });
+
+  assert.equal(Array.isArray(brief.mustReadVisualEvidence), true);
+  assert.equal(brief.mustReadVisualEvidence.length, 5);
+  assert.deepEqual(brief.mustReadVisualEvidence.map((region) => region.regionId), ['top-1', 'top-2', 'top-3', 'top-4', 'top-5']);
+  for (const region of brief.mustReadVisualEvidence) {
+    assert.ok(region.expectedPath);
+    assert.ok(region.diffPath);
+    assert.ok(region.scope);
+    assert.ok(region.evidenceRegionId);
+    assert.equal(region.actualPath, undefined);
+  }
+});
+
+test('agent brief preserves source locator and contextual evidence scope', () => {
+  const brief = createAgentBrief({
+    report: {
+      ...baseReport,
+      regionResults: [{
+        regionId: 'text-source',
+        nodeId: 'text:1',
+        diffRatio: 0.4,
+        diffPixels: 120,
+        totalPixels: 300,
+        expectedPath: 'verify/attempt_1/regions/node-text-1.expected.png',
+        diffPath: 'verify/attempt_1/regions/node-text-1.diff.png',
+        evidenceRank: 1,
+        evidenceScope: 'section',
+        evidenceRegionId: 'hero-section',
+        evidenceBox: { x: 0, y: 40, w: 320, h: 220 },
+        status: 'failed',
+      }],
+      failures: [],
+    },
+  });
+
+  assert.equal(brief.mustReadVisualEvidence.length, 1);
+  assert.equal(brief.mustReadVisualEvidence[0].regionId, 'text-source');
+  assert.equal(brief.mustReadVisualEvidence[0].nodeId, 'text:1');
+  assert.equal(brief.mustReadVisualEvidence[0].scope, 'section');
+  assert.equal(brief.mustReadVisualEvidence[0].evidenceRegionId, 'hero-section');
+  assert.deepEqual(brief.mustReadVisualEvidence[0].box, { x: 0, y: 40, w: 320, h: 220 });
 });
 
 test('agent brief file writer uses sibling repair plan and creates CLI summary', () => {

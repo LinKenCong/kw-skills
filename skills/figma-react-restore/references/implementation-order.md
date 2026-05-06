@@ -6,6 +6,7 @@ Read this file when editing React, CSS, Tailwind classes, component structure, r
 
 Establish route state and scale first, then treat exact text as a hard gate before layout tuning:
 
+0. Open the full-page diff first, then process `agent-brief.json.mustReadVisualEvidence` one expected/diff pair at a time.
 1. Page shell and route state.
 2. Exact visible text content from `text-manifest.json`.
 3. Macro layout and section boxes.
@@ -16,6 +17,8 @@ Establish route state and scale first, then treat exact text as a hard gate befo
 8. Responsive and interaction polish.
 
 Do not chase color, shadow, radius, or decorative detail before layout and text wrapping are stable.
+
+If `mustReadVisualEvidence` is non-empty and the current queue item's `expectedPath` or `diffPath` image cannot be opened, stop and report `blocked` instead of repairing from memory or guessing. Do not open all Top 5 region pairs at once; each pair should guide one focused repair target. Use `regionId`/`nodeId` as the source locator; use `scope`, `evidenceRegionId`, and `box` to understand whether the image is the exact region, an expanded crop, or a containing section.
 
 ## Page Shell And State
 
@@ -94,5 +97,6 @@ After patching:
 
 1. Rerun `restore` or `verify`.
 2. Read the new `agent-brief.json`.
-3. Confirm the targeted failure count or diff decreases.
-4. Stop on `blocked-no-improvement` rather than making blind tweaks.
+3. Open the new full-page diff, then the next `mustReadVisualEvidence` expected/diff pair before the next focused edit.
+4. Confirm the targeted failure count or diff decreases.
+5. Stop on `blocked-no-improvement` rather than making blind tweaks.

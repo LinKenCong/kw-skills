@@ -4,19 +4,25 @@ import { readJsonFile, writeJsonFile } from '../json.js';
 import { inferArtifactRootFromPath } from '../paths.js';
 import {
   agentBriefSchema,
+  boxSchema,
+  fidelitySpecSchema,
   repairPlanSchema,
   verifyReportSchema,
   type AgentBrief,
   type AgentBriefFailure,
+  type Box,
   type Failure,
+  type FidelitySpec,
   type RepairFailure,
   type RepairPlan,
+  type RegionResult,
   type VerifyReport,
 } from '../schema.js';
 
 export type AgentBriefOptions = {
   report: VerifyReport;
   plan?: RepairPlan;
+  spec?: FidelitySpec;
   reportPath?: string;
   repairPlanPath?: string;
   textManifestPath?: string;
@@ -29,6 +35,7 @@ export type AgentBriefOptions = {
 const DEFAULT_MAX_FAILURES = 10;
 const DEFAULT_MAX_REGIONS = 8;
 const DEFAULT_MAX_WARNINGS = 5;
+const MUST_READ_VISUAL_EVIDENCE_LIMIT = 5;
 
 const CATEGORY_RANK: Record<Failure['category'], number> = {
   'wrong-state': 0,
@@ -59,9 +66,30 @@ export function createAgentBrief(options: AgentBriefOptions): AgentBrief {
   const planFailures = options.plan?.worstFailures || [];
   const fallbackFailures = [...options.report.failures].sort(compareFailurePriority);
   const sourceFailures = planFailures.length > 0 ? planFailures : fallbackFailures;
+  const boxByRegionId = buildRegionBoxMap(options.report, options.spec);
+  const mustReadVisualEvidence = options.report.regionResults
+    .filter(hasMustReadVisualEvidence)
+    .sort(compareVisualEvidenceOrder)
+    .slice(0, MUST_READ_VISUAL_EVIDENCE_LIMIT)
+    .map((region, index) => {
+      const box = region.evidenceBox || boxByRegionId.get(region.evidenceRegionId || region.regionId) || boxByRegionId.get(region.regionId);
+      return {
+        rank: index + 1,
+        regionId: region.regionId,
+        ...(region.nodeId ? { nodeId: region.nodeId } : {}),
+        scope: region.evidenceScope || 'region',
+        evidenceRegionId: region.evidenceRegionId || region.regionId,
+        diffRatio: round(region.diffRatio),
+        diffPixels: region.diffPixels,
+        ...(region.threshold !== undefined ? { threshold: round(region.threshold) } : {}),
+        expectedPath: region.expectedPath,
+        diffPath: region.diffPath,
+        ...(box ? { box } : {}),
+      };
+    });
   const failedRegions = options.report.regionResults
     .filter((region) => region.status === 'failed')
-    .sort((a, b) => b.diffRatio - a.diffRatio)
+    .sort(compareRegionDiffDescending)
     .slice(0, maxRegions)
     .map((region) => ({
       regionId: region.regionId,
@@ -81,6 +109,7 @@ export function createAgentBrief(options: AgentBriefOptions): AgentBrief {
     tokenPolicy: {
       readFirst: [
         'agent-brief.json',
+        'open artifactPaths.diffPath full-page diff first, then process mustReadVisualEvidence one item at a time: open that item expectedPath/diffPath, repair that target, and avoid bulk-loading all region images',
         'implementation-brief.json for structure tree, assets, tokens, component boundaries, and likely source files',
         'wrong-state failures and report.stateResults before changing layout/CSS',
         'text-manifest.json for exact Figma copy before editing visible text',
@@ -121,6 +150,7 @@ export function createAgentBrief(options: AgentBriefOptions): AgentBrief {
     nextActions: compactStrings(options.plan?.nextActions || fallbackActions(options.report), 5, 260),
     topFailures: sourceFailures.slice(0, maxFailures).map(toBriefFailure),
     topRegions: failedRegions,
+    mustReadVisualEvidence,
     warnings: options.report.warnings.slice(0, maxWarnings),
   });
 }
@@ -139,9 +169,11 @@ export function createAgentBriefFromFiles(options: {
   const outputPath = options.outputPath || path.join(path.dirname(options.reportPath), 'agent-brief.json');
   const tracePath = resolveTracePath(options.reportPath);
   const textManifestPath = resolveTextManifestPath(options.reportPath, report.runId);
+  const spec = readFidelitySpec(resolveFidelitySpecPath(options.reportPath, report.runId));
   const brief = createAgentBrief({
     report,
     ...(plan ? { plan } : {}),
+    ...(spec ? { spec } : {}),
     reportPath: options.reportPath,
     ...(resolvedPlanPath ? { repairPlanPath: resolvedPlanPath } : {}),
     ...(textManifestPath ? { textManifestPath } : {}),
@@ -207,12 +239,83 @@ function resolveTextManifestPath(reportPath: string, runId?: string): string | u
   return undefined;
 }
 
+function resolveFidelitySpecPath(reportPath: string, runId?: string): string | undefined {
+  if (runId) {
+    const artifactRoot = inferArtifactRootFromPath(reportPath);
+    if (artifactRoot) {
+      const runCandidate = path.join(artifactRoot, 'runs', runId, 'fidelity-spec.json');
+      if (fs.existsSync(runCandidate)) return runCandidate;
+    }
+  }
+  let current = path.dirname(reportPath);
+  for (let index = 0; index < 6; index += 1) {
+    const candidate = path.join(current, 'fidelity-spec.json');
+    if (fs.existsSync(candidate)) return candidate;
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return undefined;
+}
+
+function readFidelitySpec(specPath: string | undefined): FidelitySpec | undefined {
+  if (!specPath) return undefined;
+  try {
+    const parsed = fidelitySpecSchema.safeParse(readJsonFile(specPath));
+    return parsed.success ? parsed.data : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function compareFailurePriority(a: Failure, b: Failure): number {
   const categoryDelta = CATEGORY_RANK[a.category] - CATEGORY_RANK[b.category];
   if (categoryDelta !== 0) return categoryDelta;
   const severityDelta = SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity];
   if (severityDelta !== 0) return severityDelta;
   return a.failureId.localeCompare(b.failureId);
+}
+
+type MustReadRegionResult = RegionResult & {
+  expectedPath: string;
+  diffPath: string;
+};
+
+function hasMustReadVisualEvidence(region: RegionResult): region is MustReadRegionResult {
+  return region.status === 'failed' && Boolean(region.expectedPath && region.diffPath);
+}
+
+function compareRegionDiffDescending(a: RegionResult, b: RegionResult): number {
+  const ratioDelta = b.diffRatio - a.diffRatio;
+  if (ratioDelta !== 0) return ratioDelta;
+  const pixelDelta = b.diffPixels - a.diffPixels;
+  if (pixelDelta !== 0) return pixelDelta;
+  return a.regionId.localeCompare(b.regionId);
+}
+
+function compareVisualEvidenceOrder(a: RegionResult, b: RegionResult): number {
+  if (a.evidenceRank !== undefined || b.evidenceRank !== undefined) {
+    return (a.evidenceRank ?? Number.MAX_SAFE_INTEGER) - (b.evidenceRank ?? Number.MAX_SAFE_INTEGER);
+  }
+  return compareRegionDiffDescending(a, b);
+}
+
+function buildRegionBoxMap(report: VerifyReport, spec?: FidelitySpec): Map<string, Box> {
+  const boxes = new Map<string, Box>();
+  for (const region of spec?.regions || []) {
+    boxes.set(region.regionId, region.box);
+  }
+  for (const failure of report.failures) {
+    if (!failure.regionId) continue;
+    const box = readBox((failure.expected as { box?: unknown } | undefined)?.box);
+    if (box) boxes.set(failure.regionId, box);
+  }
+  return boxes;
+}
+
+function readBox(value: unknown): Box | undefined {
+  const parsed = boxSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
 }
 
 function toBriefFailure(failure: Failure | RepairFailure): AgentBriefFailure {

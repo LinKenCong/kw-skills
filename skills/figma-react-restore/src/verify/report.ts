@@ -29,6 +29,12 @@ import { assetImplementationPolicy, hasSemanticAssetEquivalence } from './assets
 import { captureRoute, type CapturedAssetUsage, type CapturedDomNode } from './capture.js';
 import { compareImages, cropImage } from './pixel.js';
 
+const RETAINED_REGION_ARTIFACT_LIMIT = 5;
+const FONT_RENDERING_ONLY_EVIDENCE_LIMIT = 1;
+const CONTEXTUAL_CROP_MIN_WIDTH = 240;
+const CONTEXTUAL_CROP_MIN_HEIGHT = 160;
+const CONTEXTUAL_CROP_PADDING = 32;
+
 export type ResponsiveViewportSpec = {
   name: string;
   viewport: {
@@ -113,19 +119,47 @@ export async function runVerification(options: VerifyOptions): Promise<{ report:
   }
 
   const regionResults: RegionResult[] = [];
+  const regionComparisons: RegionComparison[] = [];
   const failures: Failure[] = [];
   const warnings: Warning[] = [];
-  for (const region of spec.regions.filter((item) => item.strictness !== 'ignored')) {
-    const result = await compareRegion(region, expectedPath, actualPath, outputDir, artifactRoot, resolveRegionThreshold(region, spec.thresholds.regionMaxDiffRatio));
-    regionResults.push(result);
+  const regionArtifactsDir = path.join(outputDir, 'regions');
+  const regionWorkDir = path.join(outputDir, '.region-work');
+  fs.rmSync(regionArtifactsDir, { recursive: true, force: true });
+  fs.rmSync(regionWorkDir, { recursive: true, force: true });
+  fs.mkdirSync(regionWorkDir, { recursive: true });
+  let domResults: DomResult[] = [];
+  let textResults: TextResult[] = [];
+  let styleFailures: Failure[] = [];
+  try {
+    const comparableRegions = spec.regions.filter((item) => item.strictness !== 'ignored');
+    for (const [index, region] of comparableRegions.entries()) {
+      const comparison = await compareRegion(region, index, expectedPath, actualPath, regionWorkDir, resolveRegionThreshold(region, spec.thresholds.regionMaxDiffRatio));
+      regionComparisons.push(comparison);
+      regionResults.push(comparison.result);
+    }
+
+    domResults = buildDomResults(spec, capture.domNodes, spec.thresholds.boxTolerancePx);
+    warnings.push(...buildDomMappingWarnings(domResults));
+    textResults = buildTextResults(spec, capture.domNodes, capture.visibleText);
+    styleFailures = buildStyleFailures(spec, domResults);
+    await retainFailedRegionArtifacts({
+      comparisons: regionComparisons,
+      regionsDir: regionArtifactsDir,
+      artifactRoot,
+      expectedPath,
+      actualPath,
+      workDir: regionWorkDir,
+      spec,
+      domResults,
+      textResults,
+      styleFailures,
+    });
+  } finally {
+    fs.rmSync(regionWorkDir, { recursive: true, force: true });
   }
 
-  const domResults = buildDomResults(spec, capture.domNodes, spec.thresholds.boxTolerancePx);
-  warnings.push(...buildDomMappingWarnings(domResults));
-  const textResults = buildTextResults(spec, capture.domNodes, capture.visibleText);
   const stateFailures = buildStateFailures(capture.stateResults);
   const textFailures = buildTextFailures(textResults);
-  const styleFailures = buildStyleFailures(spec, domResults);
   failures.push(...stateFailures);
   failures.push(...textFailures);
   failures.push(...styleFailures);
@@ -480,37 +514,222 @@ function buildResponsiveSmokeFailures(report: ResponsiveSmokeReport): Failure[] 
   });
 }
 
-async function compareRegion(region: Region, expectedPath: string, actualPath: string, outputDir: string, artifactRoot: string, threshold: number): Promise<RegionResult> {
-  const safeId = region.regionId.replace(/[^a-zA-Z0-9._-]+/g, '-');
-  const expectedCrop = path.join(outputDir, 'regions', `${safeId}.expected.png`);
-  const actualCrop = path.join(outputDir, 'regions', `${safeId}.actual.png`);
-  const diffCrop = path.join(outputDir, 'regions', `${safeId}.diff.png`);
+type RegionComparison = {
+  region: Region;
+  result: RegionResult;
+  expectedCrop?: string;
+  actualCrop?: string;
+  diffCrop?: string;
+};
+
+async function compareRegion(region: Region, index: number, expectedPath: string, actualPath: string, workDir: string, threshold: number): Promise<RegionComparison> {
+  const safeId = safeArtifactId(region.regionId);
+  const tempPrefix = `${String(index + 1).padStart(4, '0')}-${safeId}`;
+  const expectedCrop = path.join(workDir, `${tempPrefix}.expected.png`);
+  const actualCrop = path.join(workDir, `${tempPrefix}.actual.png`);
+  const diffCrop = path.join(workDir, `${tempPrefix}.diff.png`);
   const expectedOk = await cropImage(expectedPath, region.box, expectedCrop);
   const actualOk = await cropImage(actualPath, region.box, actualCrop);
   if (!expectedOk || !actualOk) {
     return {
-      regionId: region.regionId,
-      ...(region.nodeId ? { nodeId: region.nodeId } : {}),
-      threshold,
-      diffRatio: 1,
-      diffPixels: 0,
-      totalPixels: 0,
-      status: 'skipped',
+      region,
+      result: {
+        regionId: region.regionId,
+        ...(region.nodeId ? { nodeId: region.nodeId } : {}),
+        threshold,
+        diffRatio: 1,
+        diffPixels: 0,
+        totalPixels: 0,
+        status: 'skipped',
+      },
     };
   }
   const compare = await compareImages(expectedCrop, actualCrop, diffCrop);
   return {
-    regionId: region.regionId,
-    ...(region.nodeId ? { nodeId: region.nodeId } : {}),
-    threshold,
-    diffRatio: compare.diffRatio,
-    diffPixels: compare.diffPixels,
-    totalPixels: compare.totalPixels,
-    expectedPath: relativeArtifactPath(artifactRoot, expectedCrop),
-    actualPath: relativeArtifactPath(artifactRoot, actualCrop),
-    diffPath: relativeArtifactPath(artifactRoot, diffCrop),
-    status: compare.diffRatio <= threshold ? 'passed' : 'failed',
+    region,
+    result: {
+      regionId: region.regionId,
+      ...(region.nodeId ? { nodeId: region.nodeId } : {}),
+      threshold,
+      diffRatio: compare.diffRatio,
+      diffPixels: compare.diffPixels,
+      totalPixels: compare.totalPixels,
+      status: compare.diffRatio <= threshold ? 'passed' : 'failed',
+    },
+    expectedCrop,
+    actualCrop,
+    diffCrop,
   };
+}
+
+type EvidenceScope = 'region' | 'expanded-region' | 'section';
+
+type RetainedEvidenceCandidate = RegionComparison & {
+  evidence: {
+    scope: EvidenceScope;
+    regionId: string;
+    box: Box;
+  };
+  fontRenderingOnly: boolean;
+};
+
+async function retainFailedRegionArtifacts(options: {
+  comparisons: RegionComparison[];
+  regionsDir: string;
+  artifactRoot: string;
+  expectedPath: string;
+  actualPath: string;
+  workDir: string;
+  spec: FidelitySpec;
+  domResults: DomResult[];
+  textResults: TextResult[];
+  styleFailures: Failure[];
+}): Promise<void> {
+  const retained = selectRetainedEvidenceCandidates(options)
+    .slice(0, RETAINED_REGION_ARTIFACT_LIMIT);
+  if (retained.length === 0) return;
+
+  fs.mkdirSync(options.regionsDir, { recursive: true });
+  const usedNames = new Set<string>();
+  let evidenceRank = 1;
+  for (const comparison of retained) {
+    const baseName = uniqueRegionArtifactBaseName(comparison.region, usedNames);
+    const expectedEvidencePath = path.join(options.regionsDir, `${baseName}.expected.png`);
+    const diffEvidencePath = path.join(options.regionsDir, `${baseName}.diff.png`);
+    if (comparison.evidence.scope === 'region') {
+      fs.copyFileSync(comparison.expectedCrop!, expectedEvidencePath);
+      fs.copyFileSync(comparison.diffCrop!, diffEvidencePath);
+    } else {
+      const actualEvidencePath = path.join(options.workDir, `${baseName}.evidence.actual.png`);
+      const expectedOk = await cropImage(options.expectedPath, comparison.evidence.box, expectedEvidencePath);
+      const actualOk = await cropImage(options.actualPath, comparison.evidence.box, actualEvidencePath);
+      if (!expectedOk || !actualOk) continue;
+      await compareImages(expectedEvidencePath, actualEvidencePath, diffEvidencePath);
+    }
+    comparison.result.expectedPath = relativeArtifactPath(options.artifactRoot, expectedEvidencePath);
+    comparison.result.diffPath = relativeArtifactPath(options.artifactRoot, diffEvidencePath);
+    comparison.result.evidenceRank = evidenceRank;
+    comparison.result.evidenceScope = comparison.evidence.scope;
+    comparison.result.evidenceRegionId = comparison.evidence.regionId;
+    comparison.result.evidenceBox = comparison.evidence.box;
+    evidenceRank += 1;
+  }
+}
+
+function selectRetainedEvidenceCandidates(options: {
+  comparisons: RegionComparison[];
+  spec: FidelitySpec;
+  domResults: DomResult[];
+  textResults: TextResult[];
+  styleFailures: Failure[];
+}): RetainedEvidenceCandidate[] {
+  const domByNode = new Map(options.domResults.filter((result) => result.nodeId).map((result) => [result.nodeId!, result]));
+  const textByNode = new Map(options.textResults.filter((result) => result.nodeId).map((result) => [result.nodeId!, result]));
+  const styleFailureNodes = new Set(options.styleFailures.filter((failure) => failure.nodeId && (failure.category === 'typography' || failure.category === 'color')).map((failure) => failure.nodeId!));
+  const candidates = options.comparisons
+    .filter((comparison) => comparison.result.status === 'failed' && comparison.expectedCrop && comparison.actualCrop && comparison.diffCrop)
+    .map((comparison) => ({
+      ...comparison,
+      evidence: resolveEvidenceCrop(comparison.region, options.spec),
+      fontRenderingOnly: isToleratedFontRenderingDiff(comparison.region, domByNode, textByNode, styleFailureNodes),
+    }));
+  const primary = candidates
+    .filter((candidate) => !candidate.fontRenderingOnly)
+    .sort(compareEvidenceCandidatePriority);
+  const fontRenderingOnly = candidates
+    .filter((candidate) => candidate.fontRenderingOnly)
+    .sort(compareEvidenceCandidatePriority)
+    .slice(0, FONT_RENDERING_ONLY_EVIDENCE_LIMIT);
+  return [...primary, ...fontRenderingOnly].slice(0, RETAINED_REGION_ARTIFACT_LIMIT);
+}
+
+function compareEvidenceCandidatePriority(a: RetainedEvidenceCandidate, b: RetainedEvidenceCandidate): number {
+  const pixelDelta = b.result.diffPixels - a.result.diffPixels;
+  if (pixelDelta !== 0) return pixelDelta;
+  const ratioDelta = b.result.diffRatio - a.result.diffRatio;
+  if (ratioDelta !== 0) return ratioDelta;
+  return a.region.regionId.localeCompare(b.region.regionId);
+}
+
+function resolveEvidenceCrop(region: Region, spec: FidelitySpec): RetainedEvidenceCandidate['evidence'] {
+  const role = classifyRegionRole(region);
+  if ((role === 'text' || role === 'icon') && isContextualCropCandidate(region)) {
+    const section = nearestContainingSection(region, spec.regions, spec.viewport);
+    if (section) {
+      return { scope: 'section', regionId: section.regionId, box: section.box };
+    }
+    return { scope: 'expanded-region', regionId: region.regionId, box: expandedEvidenceBox(region.box, spec.viewport) };
+  }
+  return { scope: 'region', regionId: region.regionId, box: region.box };
+}
+
+function isContextualCropCandidate(region: Region): boolean {
+  const area = region.box.w * region.box.h;
+  return region.kind === 'text'
+    || classifyRegionRole(region) === 'icon'
+    || region.box.w < CONTEXTUAL_CROP_MIN_WIDTH
+    || region.box.h < CONTEXTUAL_CROP_MIN_HEIGHT
+    || area < CONTEXTUAL_CROP_MIN_WIDTH * CONTEXTUAL_CROP_MIN_HEIGHT;
+}
+
+function nearestContainingSection(region: Region, regions: Region[], viewport: FidelitySpec['viewport']): Region | undefined {
+  const viewportArea = viewport.width * viewport.height;
+  return regions
+    .filter((candidate) => candidate.regionId !== region.regionId)
+    .filter((candidate) => candidate.kind === 'section' || candidate.kind === 'component')
+    .filter((candidate) => containsBox(candidate.box, region.box))
+    .filter((candidate) => candidate.box.w * candidate.box.h > region.box.w * region.box.h)
+    .filter((candidate) => candidate.box.w * candidate.box.h <= viewportArea * 0.8)
+    .sort((a, b) => (a.box.w * a.box.h) - (b.box.w * b.box.h))[0];
+}
+
+function containsBox(container: Box, child: Box): boolean {
+  const tolerance = 1;
+  return child.x >= container.x - tolerance
+    && child.y >= container.y - tolerance
+    && child.x + child.w <= container.x + container.w + tolerance
+    && child.y + child.h <= container.y + container.h + tolerance;
+}
+
+function expandedEvidenceBox(box: Box, viewport: FidelitySpec['viewport']): Box {
+  const targetWidth = Math.max(CONTEXTUAL_CROP_MIN_WIDTH, box.w + CONTEXTUAL_CROP_PADDING * 2);
+  const targetHeight = Math.max(CONTEXTUAL_CROP_MIN_HEIGHT, box.h + CONTEXTUAL_CROP_PADDING * 2);
+  const centerX = box.x + box.w / 2;
+  const centerY = box.y + box.h / 2;
+  const width = Math.min(viewport.width, targetWidth);
+  const height = Math.min(viewport.height, targetHeight);
+  const x = clampNumber(centerX - width / 2, 0, Math.max(0, viewport.width - width));
+  const y = clampNumber(centerY - height / 2, 0, Math.max(0, viewport.height - height));
+  return { x, y, w: width, h: height };
+}
+
+function uniqueRegionArtifactBaseName(region: Region, usedNames: Set<string>): string {
+  const primary = region.nodeId
+    ? `node-${safeArtifactId(region.nodeId)}`
+    : `region-${safeArtifactId(region.regionId)}`;
+  if (!usedNames.has(primary)) {
+    usedNames.add(primary);
+    return primary;
+  }
+
+  const fallback = `${primary}--region-${safeArtifactId(region.regionId)}`;
+  if (!usedNames.has(fallback)) {
+    usedNames.add(fallback);
+    return fallback;
+  }
+
+  let suffix = 2;
+  let candidate = `${fallback}-${suffix}`;
+  while (usedNames.has(candidate)) {
+    suffix += 1;
+    candidate = `${fallback}-${suffix}`;
+  }
+  usedNames.add(candidate);
+  return candidate;
+}
+
+function safeArtifactId(id: string): string {
+  return id.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'unknown';
 }
 
 function buildRegionFailure(region: Region, result: RegionResult): Failure {

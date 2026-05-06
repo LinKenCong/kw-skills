@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { fidelitySpecSchema, minimalDesignIrSchema, repairPlanSchema, serviceLockSchema, verifyReportSchema } from '../dist/schema.js';
+import { agentBriefSchema, fidelitySpecSchema, minimalDesignIrSchema, repairPlanSchema, serviceLockSchema, verifyReportSchema } from '../dist/schema.js';
 
 test('schemas accept minimal valid V1 payloads', () => {
   const ir = minimalDesignIrSchema.parse({
@@ -137,4 +137,94 @@ test('schemas accept layout hints, DOM mapping tiers, and route state contract',
     warnings: [],
   });
   assert.equal(report.stateResults[0].type, 'visible-text');
+});
+
+test('schemas model retained Top 5 visual evidence without region actual crops', () => {
+  const report = verifyReportSchema.parse({
+    schemaVersion: 1,
+    status: 'failed',
+    attemptId: 'attempt_1',
+    route: 'http://localhost:3000',
+    viewport: { width: 100, height: 80, dpr: 1 },
+    fullPage: { diffRatio: 0.2, diffPixels: 100, expectedPath: 'expected.png', actualPath: 'actual.png', diffPath: 'diff.png' },
+    regionResults: [
+      { regionId: 'retained', nodeId: 'n1', threshold: 0.01, diffRatio: 0.5, diffPixels: 50, totalPixels: 100, expectedPath: 'regions/node-n1.expected.png', diffPath: 'regions/node-n1.diff.png', evidenceRank: 1, evidenceScope: 'expanded-region', evidenceRegionId: 'retained', evidenceBox: { x: 0, y: 0, w: 100, h: 80 }, status: 'failed' },
+      { regionId: 'failed-not-retained', nodeId: 'n2', threshold: 0.01, diffRatio: 0.2, diffPixels: 20, totalPixels: 100, status: 'failed' },
+      { regionId: 'passed-not-retained', nodeId: 'n3', threshold: 0.01, diffRatio: 0, diffPixels: 0, totalPixels: 100, status: 'passed' },
+    ],
+    domResults: [],
+    failures: [{ failureId: 'f1', category: 'layout-spacing', severity: 'high', message: 'region mismatch', regionId: 'retained', nodeId: 'n1' }],
+    warnings: [],
+  });
+  assert.equal(report.regionResults.length, 3);
+  assert.equal(report.regionResults[0].expectedPath, 'regions/node-n1.expected.png');
+  assert.equal(report.regionResults[0].diffPath, 'regions/node-n1.diff.png');
+  assert.equal(report.regionResults[0].evidenceScope, 'expanded-region');
+  assert.equal(report.regionResults[0].evidenceRegionId, 'retained');
+  assert.deepEqual(report.regionResults[0].evidenceBox, { x: 0, y: 0, w: 100, h: 80 });
+  assert.equal(report.regionResults[0].actualPath, undefined);
+  assert.equal(report.regionResults[1].expectedPath, undefined);
+  assert.equal(report.regionResults[1].diffPath, undefined);
+  assert.equal(report.regionResults[2].expectedPath, undefined);
+});
+
+test('agent brief schema requires expected and diff paths for must-read visual evidence', () => {
+  const payload = {
+    schemaVersion: 1,
+    kind: 'agent-brief',
+    attemptId: 'attempt_1',
+    route: 'http://localhost:3000',
+    reportStatus: 'failed',
+    tokenPolicy: { readFirst: [], avoidByDefault: [], maxFailures: 10 },
+    metrics: {
+      viewport: { width: 100, height: 80, dpr: 1 },
+      fullPageDiffRatio: 0.2,
+      fullPageDiffPixels: 100,
+      failureCount: 1,
+      failedRegionCount: 1,
+      failedDomCount: 0,
+      failedTextCount: 0,
+      failedStateCount: 0,
+      warningCount: 0,
+    },
+    artifactPaths: { expectedPath: 'expected.png', actualPath: 'actual.png', diffPath: 'diff.png' },
+    failureCounts: { 'layout-spacing': 1 },
+    nextActions: [],
+    topFailures: [],
+    topRegions: [],
+    mustReadVisualEvidence: [{
+      rank: 1,
+      regionId: 'r1',
+      nodeId: 'n1',
+      scope: 'section',
+      evidenceRegionId: 'section-1',
+      diffRatio: 0.5,
+      diffPixels: 50,
+      expectedPath: 'regions/node-n1.expected.png',
+      diffPath: 'regions/node-n1.diff.png',
+      box: { x: 0, y: 0, w: 100, h: 80 },
+    }],
+    warnings: [],
+  };
+
+  const brief = agentBriefSchema.parse(payload);
+  assert.equal(Array.isArray(brief.mustReadVisualEvidence), true);
+  assert.equal(brief.mustReadVisualEvidence.length, 1);
+  assert.equal(brief.mustReadVisualEvidence[0].expectedPath, 'regions/node-n1.expected.png');
+  const legacyBrief = agentBriefSchema.parse({ ...payload, mustReadVisualEvidence: undefined });
+  assert.deepEqual(legacyBrief.mustReadVisualEvidence, []);
+  assert.throws(
+    () => agentBriefSchema.parse({
+      ...payload,
+      mustReadVisualEvidence: [{ ...payload.mustReadVisualEvidence[0], diffPath: undefined }],
+    }),
+    /diffPath/
+  );
+  assert.throws(
+    () => agentBriefSchema.parse({
+      ...payload,
+      mustReadVisualEvidence: [{ ...payload.mustReadVisualEvidence[0], expectedPath: undefined }],
+    }),
+    /expectedPath/
+  );
 });

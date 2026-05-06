@@ -63,7 +63,7 @@ The runtime service is only needed for Figma Desktop plugin connection and extra
    figma-react-restore restore --project . --route http://localhost:3000 --run <runId> --max-iterations 3
    ```
 
-9. Read `agent-brief.json` and `text-manifest.json` first, patch the React code, then rerun `restore` until it passes or reports `blocked`.
+9. If `restore` returns `needs-initial-implementation`, implement the first real React/CSS version of the route before starting screenshot repair. Otherwise read `agent-brief.json` and `text-manifest.json` first, patch the React code, then rerun `restore` until it passes or reports `blocked`.
 
 Asset export is best-effort. If an individual asset fails, the plugin should keep `extraction.raw.json`, record `ASSET_EXPORT_FAILED`, `IMAGE_FILL_EXPORT_FAILED`, or `ASSET_ARTIFACT_UPLOAD_FAILED`, and let downstream verification report missing required assets instead of losing text/layout evidence.
 
@@ -83,10 +83,13 @@ figma-react-restore service stop --project .
 `restore` runs verification, creates a repair plan, writes an agent brief, records the attempt, and returns one of:
 
 - `passed`: fidelity gates passed.
+- `needs-initial-implementation`: the baseline assessment found the route essentially blank or unimplemented; build the first live DOM/CSS version before screenshot repair.
 - `needs-agent-patch`: read the brief/manifest, patch React/CSS, and rerun.
 - `blocked`: stop and report the `blockedReason` or top failure category.
 
-The loop blocks when the environment is unusable, design evidence is insufficient, max iterations are reached, or recent attempts show no improvement.
+The first baseline/assessment verify does not consume `--max-iterations`. Environment-blocked baseline runs also do not consume it. `--max-iterations` counts only `phase: "repair"` attempts, and plateau detection only compares recent repair attempts. Old restore state entries without `phase` are treated as repair attempts for compatibility.
+
+The loop blocks when the environment is unusable, design evidence is insufficient, repair max iterations are reached, or recent repair attempts show no improvement.
 
 ## Final Cleanup Rule
 

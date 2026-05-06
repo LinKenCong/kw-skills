@@ -353,6 +353,10 @@ export const regionResultSchema = z.object({
   expectedPath: z.string().optional(),
   actualPath: z.string().optional(),
   diffPath: z.string().optional(),
+  evidenceRank: z.number().int().positive().optional(),
+  evidenceScope: z.enum(['region', 'expanded-region', 'section']).optional(),
+  evidenceRegionId: z.string().optional(),
+  evidenceBox: boxSchema.optional(),
   status: z.enum(['passed', 'failed', 'skipped']),
 });
 export type RegionResult = z.infer<typeof regionResultSchema>;
@@ -445,6 +449,21 @@ export const agentBriefFailureSchema = z.object({
 });
 export type AgentBriefFailure = z.infer<typeof agentBriefFailureSchema>;
 
+export const agentBriefVisualEvidenceSchema = z.object({
+  rank: z.number().int().positive(),
+  regionId: z.string(),
+  nodeId: z.string().optional(),
+  scope: z.enum(['region', 'expanded-region', 'section']),
+  evidenceRegionId: z.string(),
+  diffRatio: z.number().min(0),
+  diffPixels: z.number().int().nonnegative(),
+  threshold: z.number().min(0).max(1).optional(),
+  expectedPath: z.string(),
+  diffPath: z.string(),
+  box: boxSchema.optional(),
+});
+export type AgentBriefVisualEvidence = z.infer<typeof agentBriefVisualEvidenceSchema>;
+
 export const agentBriefSchema = z.object({
   schemaVersion: z.literal(1),
   kind: z.literal('agent-brief'),
@@ -487,6 +506,7 @@ export const agentBriefSchema = z.object({
     status: z.enum(['passed', 'failed', 'skipped']),
     diffPath: z.string().optional(),
   })),
+  mustReadVisualEvidence: z.array(agentBriefVisualEvidenceSchema).default([]),
   warnings: z.array(warningSchema),
 });
 export type AgentBrief = z.infer<typeof agentBriefSchema>;
@@ -494,9 +514,12 @@ export type AgentBrief = z.infer<typeof agentBriefSchema>;
 export const restoreAttemptSchema = z.object({
   attemptId: z.string(),
   index: z.number().int().positive(),
+  phase: z.enum(['baseline', 'repair']).default('repair'),
+  repairIndex: z.number().int().positive().optional(),
   startedAt: z.string(),
   completedAt: z.string().optional(),
   status: z.enum(['running', 'passed', 'failed', 'blocked']),
+  resultStatus: z.enum(['passed', 'needs-agent-patch', 'needs-initial-implementation', 'blocked']).optional(),
   reportPath: z.string().optional(),
   repairPlanPath: z.string().optional(),
   agentBriefPath: z.string().optional(),

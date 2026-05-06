@@ -16,4 +16,5 @@ Use after automated tests pass.
 10. Confirm `agent-brief.json` contains top failures, next actions, `textManifestPath`, and artifact paths without embedding raw extraction, DesignIR, trace, or all DOM/style data.
 11. Confirm `implementation-brief.json` contains `structureTree`, `keySections`, `assetManifest`, `tokens`, `layoutConstraints`, `componentBoundaries`, and `likelySourceFiles`.
 12. Optionally run `verify --responsive-smoke` or `restore --responsive-smoke` and confirm `responsive-smoke.json` records mobile/tablet overflow, missing asset, route-state, request, and overlay smoke results.
-13. Confirm a failed restore produces concrete text/layout/typography/color/asset actions, and after three non-improving attempts it blocks with a plateau or max-iterations reason.
+13. Confirm the first baseline restore does not consume `--max-iterations`; if the route is blank/unimplemented it returns `needs-initial-implementation` and records `phase: "baseline"`.
+14. Confirm a failed repair restore produces concrete text/layout/typography/color/asset actions, and after three non-improving repair attempts it blocks with a plateau or max-iterations reason.
