@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent MD Creator"
+  short_description: "Create and maintain AGENTS.md context docs"
+  default_prompt: "Use $agent-md-creator to create or audit project AGENTS.md and Claude compatibility files."
