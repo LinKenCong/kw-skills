@@ -43,6 +43,18 @@ When the user asks to add or modify entries in `AGENTS.md`, `CLAUDE.md`, or a gl
    - opportunities to shorten, merge, or convert prose into explicit file references.
 5. Ask the user whether to apply the suggested optimizations. Do not apply optional optimization changes unless the user confirms, unless the user explicitly requested optimization in the same turn.
 
+## Large Change Backup Gate
+
+Before making large-scale document changes, ask the user whether to create a same-directory backup first. This applies to rewrites, migrations, section reorganization, broad deduplication, or replacing a wrapper/shared-rule layout; it does not apply to small single-entry edits unless the user asks.
+
+If the user wants a backup:
+
+- Create it before editing the original file.
+- Use the same directory and the format `<filename>.bk.YYYY-MM-DD`, for example `AGENTS.md.bk.2026-05-20`.
+- If that backup path already exists, append a time suffix such as `<filename>.bk.YYYY-MM-DD-HHMMSS`.
+- Do not stage or commit backup files unless the user explicitly asks.
+- Report every backup path created.
+
 ## Project Workflow
 
 1. Inspect current state before editing:
@@ -136,6 +148,7 @@ Stop and ask the user before:
 - Auto-merging different non-empty `AGENTS.md` and `CLAUDE.md` contents.
 - Moving project-specific instructions into a global file.
 - Migrating non-empty global files into `~/.agents/` shared layout.
+- Making large-scale document rewrites or migrations without first asking whether to create same-directory `.bk.YYYY-MM-DD` backups.
 - Changing a team's established agent-document convention.
 
 Do not ask before creating a missing `AGENTS.md` or a missing project `CLAUDE.md` wrapper that starts with `@AGENTS.md` when the user requested project setup.

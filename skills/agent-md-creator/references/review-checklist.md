@@ -8,6 +8,7 @@
 - If `CLAUDE.md` exists, determine whether it is missing, empty, a symlink, a regular `@AGENTS.md` wrapper, or a non-empty regular file.
 - If both files exist, compare their roles before editing.
 - In global mode, check for `~/.agents/AGENTS.md`, `~/.agents/rules/`, `~/.claude/CLAUDE.md`, and `~/.codex/AGENTS.md`.
+- Before large-scale rewrites, migrations, section reorganization, or broad deduplication, ask whether to create same-directory backups.
 
 ## Content Quality
 
@@ -60,11 +61,20 @@
 - Markdown instruction prose is not moved into `~/.codex/rules/*.md`.
 - Non-empty global files are not migrated into the shared-wrapper layout without user confirmation.
 
+## Backup Safety
+
+- Large-scale document changes ask the user whether to create backups before editing.
+- Backup files use the same directory and the format `<filename>.bk.YYYY-MM-DD`.
+- Existing backup names are not overwritten; append a time suffix when needed.
+- Backup files are reported to the user.
+- Backup files are not staged or committed unless explicitly requested.
+
 ## Final Response
 
 Report:
 
 - Files created or changed.
+- Backup files created or intentionally skipped.
 - `@` wrappers or references created, and symlinks intentionally not created.
 - Content moved, removed, or deferred to separate docs/tools.
 - Post-edit optimization suggestions, or an explicit statement that no useful optimization was found.
