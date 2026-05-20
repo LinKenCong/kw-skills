@@ -26,6 +26,7 @@ npx skills add LinKenCong/kw-skills --skill '*'
 
 ## Included skills
 
+- `agent-md-creator` — create, audit, refactor, and migrate AGENTS.md / CLAUDE.md agent instruction documents with safe project symlink handling
 - `figma-react-restore` — restore, implement, compare, verify, or repair Figma designs in existing React projects using local extraction and browser verification artifacts
 - `figma-to-code` — extract live Figma design data through a local plugin and bridge, then translate designs into production frontend code
 - `git-sync-push` — safe Git sync-and-push workflow for feature branches
