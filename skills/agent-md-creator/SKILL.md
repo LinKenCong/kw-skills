@@ -1,6 +1,6 @@
 ---
 name: agent-md-creator
-description: Create, audit, refactor, and migrate agent instruction documents for coding agents. Use when the user asks to create or improve AGENTS.md, CLAUDE.md, agent memory files, project instructions, monorepo agent context, Claude Code/Codex shared project guidance, or when consolidating CLAUDE.md into AGENTS.md with safe symlink handling.
+description: Create, audit, refactor, and migrate agent instruction documents for coding agents. Use when the user asks to create or improve AGENTS.md, CLAUDE.md, agent memory files, project instructions, monorepo agent context, Claude Code/Codex shared project guidance, or when consolidating AGENTS.md and CLAUDE.md with safe @ reference handling.
 ---
 
 # Agent MD Creator
@@ -19,18 +19,20 @@ Load these references only when needed:
 
 Determine the target mode before editing:
 
-- **Project mode**: Work inside a repository or project directory. Author `AGENTS.md` as the canonical file and create `CLAUDE.md` as a relative symlink to `AGENTS.md` for Claude compatibility.
-- **Global mode**: Work on user-level configuration. Do not symlink. Maintain tool-specific files separately:
+- **Project mode**: Work inside a repository or project directory. Author `AGENTS.md` as the canonical file and create `CLAUDE.md` as a regular file that starts with `@AGENTS.md`; append Claude-specific project rules after the import only when needed.
+- **Global mode**: Work on user-level configuration. Do not symlink. Prefer shared personal rules under `~/.agents/` plus tool-specific wrapper files:
+  - `~/.agents/AGENTS.md`
+  - `~/.agents/rules/*.md`
   - `~/.claude/CLAUDE.md`
   - `~/.codex/AGENTS.md`
 
-If the request is ambiguous, infer from the target path. Paths under a repository are project mode; paths under `~/.claude` or `~/.codex` are global mode.
+If the request is ambiguous, infer from the target path. Paths under a repository are project mode; paths under `~/.agents`, `~/.claude`, or `~/.codex` are global mode.
 
 ## Project Workflow
 
 1. Inspect current state before editing:
    - Check for `AGENTS.md` and `CLAUDE.md`.
-   - Check whether `CLAUDE.md` is missing, empty, a symlink, or a non-empty regular file.
+   - Check whether `CLAUDE.md` is missing, empty, a symlink, a regular `@AGENTS.md` wrapper, or a non-empty regular file.
    - Inspect nearby context such as `README.md`, package manifests, build files, CI, docs, and relevant module directories.
 2. Choose document placement:
    - Put high-frequency, stable, project-wide facts in root `AGENTS.md`.
@@ -41,43 +43,84 @@ If the request is ambiguous, infer from the target path. Paths under a repositor
 3. Write or refactor `AGENTS.md`:
    - Keep it concise and specific.
    - Prefer file references over copied code.
+   - If using `@path` references for Codex-facing guidance, add a short instruction before them telling agents to read those referenced files.
    - Use commands that actually match the detected project tooling.
    - State assumptions when project evidence is incomplete.
 4. Handle `CLAUDE.md` safely:
-   - If missing, create `CLAUDE.md` as a relative symlink: `CLAUDE.md -> AGENTS.md`.
-   - If already a symlink to `AGENTS.md`, leave it unchanged.
-   - If whitespace-only or empty, replace it with the symlink.
-   - If non-empty, a different symlink, or both files contain conflicting content, do not overwrite. Summarize the situation and ask the user before migration.
+   - If missing, create a regular `CLAUDE.md` that starts with `@AGENTS.md`.
+   - If Claude-specific project rules are needed, append them below the import in a clearly labeled section.
+   - If already a regular file that imports `AGENTS.md`, leave the import intact and edit only the relevant Claude-specific section.
+   - If whitespace-only or empty, replace it with the `@AGENTS.md` wrapper.
+   - If it is a symlink, a non-empty file without an `AGENTS.md` import, or it conflicts with `AGENTS.md`, do not overwrite. Summarize the situation and ask the user before migration.
 5. Report what changed and why, including any content moved, removed, or deferred to tools/docs.
 
-Use a relative symlink command in the target directory:
+Use this project `CLAUDE.md` wrapper when no Claude-specific rules are needed:
 
-```bash
-ln -s AGENTS.md CLAUDE.md
+```md
+@AGENTS.md
 ```
 
-Never create an absolute symlink for this compatibility file.
+Use this wrapper when Claude-specific project rules are needed:
+
+```md
+@AGENTS.md
+
+## Claude Code
+
+- Add only Claude-specific project behavior here.
+```
+
+Do not create a project `CLAUDE.md` symlink by default.
 
 ## Global Workflow
 
-Maintain Claude and Codex global files separately:
+Use a shared global source of personal rules plus tool-specific wrappers:
 
-- Use `~/.claude/CLAUDE.md` for Claude Code-specific memory, hooks, slash-command assumptions, and personal Claude workflow.
-- Use `~/.codex/AGENTS.md` for Codex-specific behavior, sandbox/approval expectations, skills, automation, and personal Codex workflow.
+- Use `~/.agents/AGENTS.md` for cross-agent, cross-project personal defaults and safety rules.
+- Use `~/.agents/rules/*.md` for longer shared rule documents that should apply to multiple agents.
+- Use `~/.claude/CLAUDE.md` as a Claude Code wrapper:
+  - Reference shared files with Claude Code's supported `@path` import syntax.
+  - Keep Claude-specific memory, hooks, slash-command assumptions, and Claude workflow in this file.
+- Use `~/.codex/AGENTS.md` as a Codex wrapper:
+  - Include an explicit instruction telling Codex agents to read files referenced by `@path` lines.
+  - List shared files with `@path` references, but do not claim Codex automatically expands them.
+  - Keep Codex-specific sandbox, approval, skills, automation, and runtime behavior in this file.
 
-Shared personal principles can be expressed in both files, but do not symlink them because global agent runtimes and tool semantics differ.
+Example Codex wrapper pattern:
+
+```md
+# Agent Rules
+
+## Reference Loading
+
+- Before applying these rules, read every file referenced by a line that starts with `@`.
+- Expand `~` to the user's home directory when resolving `@` references.
+- Treat referenced files as part of this global guidance unless a higher-priority instruction conflicts.
+
+@~/.agents/AGENTS.md
+@~/.agents/rules/security.md
+
+## Codex Workflow
+
+- Add only Codex-specific runtime behavior here.
+```
+
+Do not use global symlinks. Do not put Markdown instruction prose in `~/.codex/rules/*.md`; Codex uses its `rules/` directory for approval-rule data unless the runtime documentation says otherwise.
+
+If the current global setup is not in this shared-wrapper layout, inspect the existing files, classify shared/tool-specific/conflicting content, and ask the user before migrating non-empty global files.
 
 ## Safety Gates
 
 Stop and ask the user before:
 
 - Overwriting or deleting a non-empty `CLAUDE.md`.
-- Replacing a `CLAUDE.md` symlink that points somewhere other than `AGENTS.md`.
+- Replacing any existing `CLAUDE.md` symlink with a regular file.
 - Auto-merging different non-empty `AGENTS.md` and `CLAUDE.md` contents.
 - Moving project-specific instructions into a global file.
+- Migrating non-empty global files into `~/.agents/` shared layout.
 - Changing a team's established agent-document convention.
 
-Do not ask before creating a missing `AGENTS.md` or a missing project `CLAUDE.md -> AGENTS.md` symlink when the user requested project setup.
+Do not ask before creating a missing `AGENTS.md` or a missing project `CLAUDE.md` wrapper that starts with `@AGENTS.md` when the user requested project setup.
 
 ## Output Quality
 
