@@ -28,6 +28,21 @@ Determine the target mode before editing:
 
 If the request is ambiguous, infer from the target path. Paths under a repository are project mode; paths under `~/.agents`, `~/.claude`, or `~/.codex` are global mode.
 
+## Entry Update Workflow
+
+When the user asks to add or modify entries in `AGENTS.md`, `CLAUDE.md`, or a global agent instruction file:
+
+1. Apply the requested entry in the safest appropriate location, following the project or global workflow below.
+2. After editing, re-read the latest version of the changed document and any directly affected wrapper/import file.
+3. Review the latest document against `references/best-practices.md` and `references/review-checklist.md`.
+4. Report optimization suggestions separately from the completed edit. Check for:
+   - duplicated or conflicting rules;
+   - vague, temporary, or overly broad wording;
+   - content that belongs in a descendant `AGENTS.md`, `agent_docs/*.md`, `~/.agents/rules/*.md`, or a tool config instead;
+   - commands, paths, or assumptions that are unverified or too project-specific for the current scope;
+   - opportunities to shorten, merge, or convert prose into explicit file references.
+5. Ask the user whether to apply the suggested optimizations. Do not apply optional optimization changes unless the user confirms, unless the user explicitly requested optimization in the same turn.
+
 ## Project Workflow
 
 1. Inspect current state before editing:
@@ -52,7 +67,8 @@ If the request is ambiguous, infer from the target path. Paths under a repositor
    - If already a regular file that imports `AGENTS.md`, leave the import intact and edit only the relevant Claude-specific section.
    - If whitespace-only or empty, replace it with the `@AGENTS.md` wrapper.
    - If it is a symlink, a non-empty file without an `AGENTS.md` import, or it conflicts with `AGENTS.md`, do not overwrite. Summarize the situation and ask the user before migration.
-5. Report what changed and why, including any content moved, removed, or deferred to tools/docs.
+5. If this was an entry add/update request, run the Entry Update Workflow's post-edit optimization review.
+6. Report what changed and why, including any content moved, removed, deferred to tools/docs, or recommended for follow-up optimization.
 
 Use this project `CLAUDE.md` wrapper when no Claude-specific rules are needed:
 
@@ -108,6 +124,8 @@ Example Codex wrapper pattern:
 Do not use global symlinks. Do not put Markdown instruction prose in `~/.codex/rules/*.md`; Codex uses its `rules/` directory for approval-rule data unless the runtime documentation says otherwise.
 
 If the current global setup is not in this shared-wrapper layout, inspect the existing files, classify shared/tool-specific/conflicting content, and ask the user before migrating non-empty global files.
+
+After adding or modifying global entries, re-read the latest wrapper and shared files that changed, then run the Entry Update Workflow's post-edit optimization review.
 
 ## Safety Gates
 

@@ -19,6 +19,15 @@
 - Copied code is replaced with file references.
 - Vague advice is removed or converted into concrete project constraints.
 
+## Post-Edit Optimization Review
+
+- After adding or modifying entries, re-read the latest changed document rather than relying on the pre-edit version.
+- Check whether the new entry duplicates, conflicts with, or weakens existing rules.
+- Check whether the new entry is stable, specific, actionable, and scoped to the right project/global/tool layer.
+- Check whether the entry should move to a descendant `AGENTS.md`, `agent_docs/*.md`, `~/.agents/rules/*.md`, or a deterministic tool config.
+- Check whether the wording can be shortened, merged with an existing rule, or replaced with a file reference.
+- Report optimization suggestions and ask the user whether to apply them before making optional optimization edits.
+
 ## Placement
 
 - Project-wide instructions are in root `AGENTS.md`.
@@ -58,5 +67,6 @@ Report:
 - Files created or changed.
 - `@` wrappers or references created, and symlinks intentionally not created.
 - Content moved, removed, or deferred to separate docs/tools.
+- Post-edit optimization suggestions, or an explicit statement that no useful optimization was found.
 - Any assumptions or unresolved conflicts.
 - Suggested validation or follow-up only when useful.
