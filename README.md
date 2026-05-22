@@ -31,6 +31,7 @@ npx skills add LinKenCong/kw-skills --skill '*'
 - `figma-to-code` — extract live Figma design data through a local plugin and bridge, then translate designs into production frontend code
 - `git-sync-push` — safe Git sync-and-push workflow for feature branches
 - `linus-review` — non-trivial code, PR, architecture, plan, compatibility, migration, refactor, and regression-risk reviews through a direct Linus-inspired engineering lens
+- `project-spec-design` — turn new project, product, or feature ideas into approved specs and sequential implementation task plans for later development
 - `skill-template-manager` — manager-owned skill store, reusable symlink templates, and project-level skill activation
 
 ## Notes
