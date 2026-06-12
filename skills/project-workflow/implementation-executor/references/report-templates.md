@@ -297,7 +297,7 @@ Return to the same assigned worker worktree and fix only these unresolved valid 
 ## Final User Report
 
 ```markdown
-Implemented the approved task.
+Final status for the approved task: <accepted | partial | blocked>.
 
 - Scope completed:
 - Key files changed:

@@ -1,6 +1,6 @@
 ---
 name: implementation-executor
-description: Executes an approved implementation task with a strong, auditable workflow: run cache, task branch setup, TDD contract tests, isolated subagent worktrees, independent reviewer subagents, validation, acceptance evidence, local integration, and cleanup. Use when the user explicitly asks to run implementation-executor, execute an approved implementation task, continue an implementation run, or complete a scoped task from an implementation plan; do not use for vague requirements, initial spec design, pure review, or trivial edits.
+description: "Executes an approved implementation task with a strong, auditable workflow: run cache, task branch setup, TDD contract tests, isolated subagent worktrees, independent reviewer subagents, validation, acceptance evidence, local integration, and cleanup. Use when the user explicitly asks to run implementation-executor, execute an approved implementation task, continue an implementation run, or complete a scoped task from an implementation plan; do not use for vague requirements, initial spec design, pure review, or trivial edits."
 ---
 
 # Implementation Executor
