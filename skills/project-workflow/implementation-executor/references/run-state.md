@@ -108,6 +108,8 @@ If project rules forbid changing ignore files, stop and ask how to store run sta
 
 `evidence/integration.md` records accepted worker provenance and integration results.
 
+`evidence/finalization.md` records task-branch commits, merge or merge deferral, final worktree state, cleanup actions, and whether a runner completion signal was emitted.
+
 `HANDOFF.md` records enough context for a new main agent to resume safely.
 
 ## Example `state.json`
@@ -154,7 +156,14 @@ If project rules forbid changing ignore files, stop and ask how to store run sta
       "method": "cherry-pick",
       "taskBranchCommit": "<sha>"
     }
-  ]
+  ],
+  "finalization": {
+    "implementationCommits": ["<sha>"],
+    "mergeCommit": "<sha-or-null>",
+    "mergeDeferredReason": null,
+    "worktreeClean": true,
+    "completionSignalEmitted": false
+  }
 }
 ```
 
@@ -175,3 +184,7 @@ Store command names, concise summaries, changed file lists, redacted snippets, a
 If a formal task document, implementation index, issue, or project ledger exists, backfill it during finalization. The run cache does not replace formal project completion records.
 
 If no formal task document exists, the run cache is the execution ledger and acceptance matrix location. Do not invent project docs unless the user asks.
+
+## Completion Signals
+
+If an external runner consumes a completion signal, record the exact signal and the gate evidence in the run cache before emitting it. A completion signal is only valid when the formal docs, git state, validation, review, acceptance matrix, and cleanup records all agree with the completed status. If any gate is missing, write a handoff and emit a blocked or partial result instead.

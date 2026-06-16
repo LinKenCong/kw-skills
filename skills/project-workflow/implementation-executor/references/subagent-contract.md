@@ -1,6 +1,8 @@
 # Subagent Contract
 
-Subagents are scoped workers. The main agent owns orchestration, final acceptance, integration, task completion status, target-branch merge, push decisions, and cleanup decisions.
+Subagents are scoped workers. The main agent owns orchestration, final acceptance, integration, task completion status, target-branch merge, push decisions, completion-signal decisions, and cleanup decisions.
+
+For non-trivial code-changing tasks, subagents are not decorative. Executor workers should own current-scope implementation in assigned worktrees, and reviewer workers should independently check each accepted executor result. If subagents are unavailable or the user explicitly approves a downgrade, record that decision before the main agent implements current-scope code.
 
 ## Roles
 
@@ -37,6 +39,8 @@ Examples:
 
 Subagents must not work in the project root, target branch, task branch, or another subagent's worktree unless the main agent explicitly assigns a recovery action.
 
+The main agent should not implement substantial current-scope code directly in the project root or task branch. Acceptable main-agent edits are limited to contract tests, branch/run setup, tiny integration glue, mechanical conflict resolution, documentation backfill, and narrowly scoped fixes after reviewer findings. If main-agent implementation exceeds that boundary, record a downgrade decision in `RUN.md` and require independent review before completion.
+
 ## Executor Assignment Must Include
 
 - worker id and slug;
@@ -64,6 +68,8 @@ An executor worker may report done only when:
 - changed files stay within allowed scope;
 - worker report is complete.
 
+The main agent must reject executor results that are only conversational summaries. A usable result needs a durable report path, commit id, changed-file list, validation evidence, and clean assigned worktree metadata.
+
 ## Reviewer Assignment Must Include
 
 - reviewer id;
@@ -75,6 +81,8 @@ An executor worker may report done only when:
 - required validation evidence to inspect;
 - finding categories;
 - report path.
+
+Reviewer workers must be independent from the executor they review. Do not let the same subagent implement and approve its own work.
 
 ## Reviewer Finding Categories
 
@@ -98,6 +106,8 @@ An executor worker may report done only when:
 Only valid unresolved `must-fix` findings may be automatically returned to the executor worker.
 
 The main agent must reject or downgrade findings that are imprecise, unsupported, or expand scope.
+
+Reviewer `pass` means the worker result may enter the integration gate. It does not replace final aggregate review after worker output is integrated into the task branch.
 
 ## Fix Loop
 
@@ -126,6 +136,18 @@ On violation:
 5. If changes landed in the project root, task branch, or target branch, stop the run and ask the user unless project rules provide a safe recovery path and the changes are proven to be exclusively from that subagent.
 6. Never reset, revert, delete, or overwrite user changes.
 7. Re-delegate in a fresh assigned worktree if the task should continue.
+
+## Downgrade Protocol
+
+Use a downgrade only when subagent execution is impossible, unsafe, or explicitly waived by the user. Before proceeding without normal executor/reviewer workers, record in `RUN.md` and `state.json`:
+
+- why subagent execution cannot be used;
+- which parts the main agent will implement directly;
+- what independent review will replace the normal reviewer worker;
+- which validation proves the same acceptance criteria;
+- whether the user approved the downgrade when required.
+
+Do not emit a completion signal with an unrecorded downgrade.
 
 ## State Values
 

@@ -4,7 +4,7 @@ The acceptance matrix is the final proof that the approved scope was implemented
 
 ## When To Write It
 
-Write an acceptance matrix for every non-trivial run.
+Write an acceptance matrix for every non-trivial run and every code-changing run with a formal task document, implementation index, issue, or runner completion signal.
 
 If a formal implementation task document or index exists, backfill the matrix or an equivalent record there before declaring the task complete.
 
@@ -86,6 +86,14 @@ Before merging task branch to target branch:
 Task-branch-to-target-branch merge preserves a Git merge record by default.
 
 Never run `git push` without explicit user authorization for the current push.
+
+Before marking a formal task complete or printing a runner completion signal:
+
+- current-scope changes are committed on the task branch;
+- implementation commit ids are recorded in the run cache and formal docs when they exist;
+- merge commit is recorded when merge is required;
+- if merge is deferred, the deferral is explicitly allowed and the final status is partial or blocked unless the user accepts no-merge completion;
+- final worktree status is recorded and uncommitted current-scope changes are not left behind.
 
 ## Cleanup Gate
 

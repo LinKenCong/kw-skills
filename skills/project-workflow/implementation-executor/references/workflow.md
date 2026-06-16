@@ -32,7 +32,7 @@ This workflow executes approved implementation scope. It does not design require
 
 ### 5. TDD Contract
 
-- Write behavior-focused contract tests before implementation when feasible.
+- Write behavior-focused contract tests before implementation for non-trivial code-changing work unless infeasible.
 - Verify they fail for the expected reason before sending implementation work to a worker.
 - If TDD is infeasible, record the reason and alternative validation plan.
 - Treat project-required TDD as mandatory.
@@ -43,6 +43,7 @@ This workflow executes approved implementation scope. It does not design require
 - Prefer tracer-bullet slices that each produce observable behavior.
 - Parallelize only low-coupling write sets.
 - Keep shared foundations, migrations, broad API shapes, and final integration serial unless the project explicitly supports parallel work there.
+- For non-trivial code-changing work, plan at least one executor worker and one independent reviewer unless subagents are unavailable or the user explicitly approves a main-agent downgrade.
 
 ### 7. Executor Worker Implementation
 
@@ -50,6 +51,7 @@ This workflow executes approved implementation scope. It does not design require
 - Give each worker allowed paths, forbidden paths, expected output, required tests, and report template.
 - Require a worker commit and clean assigned worktree before the worker reports done.
 - Workers must not change, weaken, delete, skip, or rename main-agent contract tests without authorization.
+- Do not accept a stdout-only implementation report. The worker result must have a durable report, commit id, changed-file list, and validation evidence.
 
 ### 8. Reviewer Worker Review
 
@@ -90,6 +92,7 @@ Before integrating a worker result, confirm:
 - Review the final aggregate diff against the target branch.
 - Fix only current-scope findings and rerun relevant validation.
 - Do not rely only on worker-level results for final acceptance.
+- Record final aggregate validation and review in the run cache before any formal completion signal.
 
 ### 13. Acceptance Matrix
 
@@ -107,6 +110,8 @@ Before integrating a worker result, confirm:
 - Merge the accepted task branch to the target branch with a preserved merge record by default.
 - Do not push without explicit user authorization for the current push.
 - Record merge command, merge commit, and post-merge validation.
+- If project rules, user instructions, or the runner require a local merge before task completion, do not mark the task completed until the merge is done and recorded.
+- If merge is intentionally deferred, record who allowed the deferral, the reason, and the exact next command; report the task as partial or blocked, not complete, unless the user explicitly accepts no-merge completion.
 
 ### 16. Cleanup And Final Report
 
@@ -114,6 +119,23 @@ Before integrating a worker result, confirm:
 - Clean executor worktrees only after review pass, integration, evidence recording, and no unrecorded work remains.
 - Clean task branches only when project rules and user intent allow it.
 - Final report summarizes scope completed, files changed, validation, review, acceptance matrix result, docs backfill, commits, cleanup, and remaining risks.
+
+### 17. Completion Signal Gate
+
+Before printing a runner completion signal or marking a formal implementation task `completed`, verify and record all of:
+
+- run cache is current and contains `RUN.md`, `TODO.md`, `state.json`, `HANDOFF.md`, and evidence files;
+- contract tests have RED and GREEN evidence, or TDD skip is explicitly justified;
+- executor workers have durable reports, worker commits, clean assigned worktrees, and required validation evidence, or a documented downgrade exists;
+- reviewer reports exist and no unresolved current-scope `must-fix` findings remain;
+- final aggregate validation and review have run after integration;
+- acceptance matrix has no unexplained gaps;
+- formal task docs or indexes are backfilled when they exist;
+- current-scope changes are committed on the task branch and commit ids are recorded;
+- merge to target branch is complete when required, or deferral is explicitly allowed and reported as not fully complete;
+- final worktree state and cleanup decisions are recorded.
+
+If any required item is missing, do not emit the completion signal. Emit a blocked or partial result with the missing gate and safe resume instructions.
 
 ## Resume Rules
 

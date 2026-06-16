@@ -34,6 +34,7 @@ Use these templates as starting points. Keep reports concise, factual, and scope
 | Integration | pending | - |
 | Final validation | pending | - |
 | Acceptance | pending | - |
+| Finalization gate | pending | - |
 | Cleanup | pending | - |
 
 ## Decisions
@@ -53,10 +54,14 @@ Use these templates as starting points. Keep reports concise, factual, and scope
 - [ ] Task branch ready
 - [ ] Contract tests RED or TDD skip recorded
 - [ ] Worker plan recorded
+- [ ] Executor worker reports and commits recorded, or downgrade recorded
 - [ ] Reviews accepted
 - [ ] Integration evidence recorded
 - [ ] Acceptance matrix complete
 - [ ] Docs backfilled if required
+- [ ] Current-scope changes committed on task branch
+- [ ] Merge completed when required, or deferral recorded as partial/blocked
+- [ ] Completion signal gate satisfied before any runner signal
 - [ ] Cleanup complete
 
 ## Worker Queue
@@ -276,6 +281,40 @@ Return to the same assigned worker worktree and fix only these unresolved valid 
 - Cleanup status:
 ```
 
+## Finalization Evidence
+
+```markdown
+# Finalization Evidence
+
+## Git State
+
+- Target branch:
+- Task branch:
+- Implementation commits:
+- Documentation commits:
+- Merge commit:
+- Merge deferred reason:
+- Final branch:
+- Final worktree status:
+
+## Completion Signal Gate
+
+- Contract tests RED/GREEN or skip recorded: pass | fail
+- Executor worker reports and commits recorded: pass | fail | downgraded
+- Reviewer reports accepted: pass | fail
+- Final aggregate validation recorded: pass | fail
+- Acceptance matrix complete: pass | fail
+- Formal docs backfilled: pass | fail | not applicable
+- Current-scope changes committed: pass | fail
+- Required merge completed or deferral accepted: pass | fail
+- Cleanup recorded: pass | fail
+- Completion signal emitted: yes | no
+
+## Blockers Or Partial Completion
+
+- <missing gate, safe resume instruction, or none>
+```
+
 ## Validation Evidence
 
 ```markdown
@@ -307,6 +346,7 @@ Final status for the approved task: <accepted | partial | blocked>.
 - Documentation backfill:
 - Commits and merge:
 - Cleanup:
+- Completion signal gate:
 - Remaining risks or follow-ups:
 ```
 
