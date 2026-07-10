@@ -38,6 +38,7 @@ npx skills add LinKenCong/kw-skills --skill '*'
 - `linus-review` — non-trivial code, PR, architecture, plan, compatibility, migration, refactor, and regression-risk reviews through a direct Linus-inspired engineering lens
 - `project-spec-design` — turn new project, product, or feature ideas into approved specs and sequential implementation task plans for later development
 - `skill-template-manager` — manager-owned skill store, reusable symlink templates, and project-level skill activation
+- `weekly-report` — generate Chinese personal weekly reports from Git commit activity, with confirmed project paths, date ranges, output location, and safe default filenames
 
 ## Notes
 
