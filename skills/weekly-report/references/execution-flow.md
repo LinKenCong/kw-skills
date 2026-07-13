@@ -7,6 +7,7 @@
 - 项目路径列表
 - 日期范围列表
 - Git 作者或账户
+- 报告人 Git username
 - 输出目录
 
 缺失信息按下面规则补齐。
@@ -39,7 +40,7 @@
 - 用户可以指定任意可写目录
 - 最终确认前不要创建目录、不要写文件
 
-### 0.4 解析 Git 作者
+### 0.4 解析 Git 作者和报告人
 
 用户没有指定作者时，默认当前 Git 账户，不单独询问作者。
 
@@ -52,13 +53,18 @@ git config --global --get user.name
 git config --global --get user.email
 ```
 
-优先使用邮箱。优先使用当前工作目录解析出的账户；当前工作目录无法解析时，再使用项目列表中第一个能解析出账户的项目。如果仍无法解析，询问用户指定作者。
+需要同时区分两个值：
+
+- `report_user`：报告人展示名，必须使用 Git username（`git config user.name`）或用户明确指定的用户名，不要用邮箱。
+- `author_filter`：Git 作者过滤条件，可优先使用邮箱以提高匹配稳定性；没有邮箱时使用 Git username。
+
+优先使用当前工作目录解析出的账户；当前工作目录无法解析时，再使用项目列表中第一个能解析出账户的项目。如果仍无法解析 `report_user`，询问用户指定 Git username；如果仍无法解析 `author_filter`，询问用户指定 Git 作者。
 
 ### 0.5 准备计划文件名
 
 - 每个日期范围准备一个计划文件名。
 - 默认建议格式是 `weekly-report_YYYY-MM-DD_YYYY-MM-DD_<git username>.md`。
-- `<git username>` 优先使用 `git config user.name`，并做文件名安全化处理；不要把完整邮箱放进默认文件名。
+- `<git username>` 优先使用 `git config user.name`，并做文件名安全化处理；不要把完整邮箱放进默认文件名，也不要把邮箱作为报告人。
 - 这个文件名只是默认建议，不是固定要求；最终确认清单必须让用户确认或修改。
 
 ## 第一步：执行前最终确认
@@ -70,7 +76,8 @@ git config --global --get user.email
 ```markdown
 准备生成周报，请确认：
 
-- Git 账户：[作者过滤条件]
+- 报告人：[Git username]
+- 作者过滤：[作者过滤条件]
 - 时间范围：
   1. YYYY-MM-DD ~ YYYY-MM-DD
   2. YYYY-MM-DD ~ YYYY-MM-DD
@@ -103,7 +110,7 @@ git config --global --get user.email
 
 ```bash
 sh "<skill_dir>/scripts/collect-git-activity.sh" \
-  --author "作者或邮箱" \
+  --author "作者过滤条件" \
   --since "YYYY-MM-DD" \
   --until "YYYY-MM-DD" \
   --project "/path/to/project-a" \
@@ -116,7 +123,7 @@ sh "<skill_dir>/scripts/collect-git-activity.sh" \
 - `STATUS	no_records`：该项目在该日期范围没有作者记录
 - `STATUS	not_git`：不是 Git 仓库
 - `STATUS	missing_path`：路径不存在或不可访问
-- `COMMIT`、`STAT`、`FILE`、`MODULE`：可用于写周报的数据
+- `COMMIT`、`FILE`、`MODULE`：可用于写周报的数据
 
 ## 第三步：脚本失败时兜底
 
@@ -136,33 +143,20 @@ git -C <project> rev-parse --is-inside-work-tree
 git -C <project> log \
   --since="YYYY-MM-DD 00:00:00" \
   --until="YYYY-MM-DD 23:59:59" \
-  --author="作者或邮箱" \
+  --author="作者过滤条件" \
   --date=short \
   --pretty=format:"%h|%ad|%an|%ae|%s"
 ```
 
 无输出表示该项目该周期无记录，跳过正文内容。
 
-### 3.3 获取代码变更统计
+### 3.3 获取变更文件和模块
 
 ```bash
 git -C <project> log \
   --since="YYYY-MM-DD 00:00:00" \
   --until="YYYY-MM-DD 23:59:59" \
-  --author="作者或邮箱" \
-  --numstat \
-  --pretty=format:""
-```
-
-用输出统计文件改动条目、新增行、删除行。二进制文件的 `-` 计为未知，不要强行估算。
-
-### 3.4 获取变更文件和模块
-
-```bash
-git -C <project> log \
-  --since="YYYY-MM-DD 00:00:00" \
-  --until="YYYY-MM-DD 23:59:59" \
-  --author="作者或邮箱" \
+  --author="作者过滤条件" \
   --name-status \
   --pretty=format:""
 ```
@@ -187,9 +181,9 @@ git -C <project> log \
 
 - 非 Git 项目：跳过，并记录原因。
 - 路径不存在：跳过，并记录原因。
-- 指定范围内没有作者记录：跳过正文，不创建空项目小节。
+- 指定范围内没有作者记录：静默跳过，不创建空项目小节，不写入报告的数据说明或“跳过项目”，也不要在最终回复的跳过列表里逐项列出。
 - 某个日期范围所有项目都无记录：不生成该范围的空周报文件。
-- 跳过信息写入最终回复；已生成的周报文件中可放到“数据说明”区块。
+- 异常跳过信息（非 Git、缺失路径、不可读）写入最终回复；已生成的周报文件中可放到“数据说明”区块。无记录项目不属于异常跳过。
 
 ## 第六步：生成文件和最终回复
 
@@ -198,8 +192,9 @@ git -C <project> log \
 最终回复包含：
 
 - 已生成文件路径
-- 使用的 Git 作者
+- 报告人 Git username
+- 使用的 Git 作者过滤条件
 - 覆盖的日期范围
 - 有记录的项目
-- 跳过的项目和原因
+- 异常跳过的项目和原因（仅非 Git、缺失路径、不可读）
 - 没有生成文件的日期范围及原因
